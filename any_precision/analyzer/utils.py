@@ -10,6 +10,7 @@ def load_model(model_str_or_model, dtype=torch.float16, cpu_only=False):
             trust_remote_code=True,
             torch_dtype=dtype,
             device_map='cpu' if cpu_only else 'auto',
+            use_auth_token=True
         )
     else:
         assert isinstance(model_str_or_model, PreTrainedModel), "model must be a string or a PreTrainedModel"
