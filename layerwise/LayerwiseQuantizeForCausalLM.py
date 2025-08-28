@@ -186,7 +186,7 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         
         print("✓ Unfrozen original LM parameters")
 
-    def train_forward(self, input_ids, attention_mask=None, **kwargs):
+    def train_forward(self, input_ids, attention_mask=None, return_router_outputs=False, **kwargs):
         """Forward pass during training with mixed precision based on router outputs."""
         batch_size, seq_len = input_ids.shape
         
@@ -204,6 +204,7 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         
         # Process through each transformer layer with its own router
         layers = self.get_model_layers()
+        router_outputs = []
         
         for layer_idx, layer in enumerate(layers):
             # Count real tokens for each sample in the batch
@@ -211,6 +212,7 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
             
             # Get router output for this layer
             layer_router_output = self.routers[layer_idx](current_input, num_real_tokens)
+            router_outputs.append(layer_router_output)
             
             # Initialize layer output
             layer_output = torch.zeros_like(current_input)
@@ -235,7 +237,10 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         # Final output processing through lm_head
         final_output = self.model.lm_head(current_input)
         
-        return type('Outputs', (), {'logits': final_output})()
+        if return_router_outputs:
+            return type('Outputs', (), {'logits': final_output, 'router_outputs': router_outputs})()
+        else:
+            return type('Outputs', (), {'logits': final_output})()
 
     def infer_forward(self, input_ids, attention_mask=None, **kwargs):
         """Forward pass during inference using the precision with maximum router weight."""
