@@ -37,11 +37,11 @@ def replace_module_by_name(layer, module_name, new_module):
 
 class Router(nn.Module):
     """Router network that outputs a one-hot vector for precision selection."""
-    def __init__(self, input_dim, num_precisions, hidden_dim=128):
+    def __init__(self, input_dim, num_precisions, hidden_dim=128, dtype=torch.float16):
         super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, num_precisions)
+        self.fc1 = nn.Linear(input_dim, hidden_dim, dtype=dtype)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim, dtype=dtype)
+        self.fc3 = nn.Linear(hidden_dim, num_precisions, dtype=dtype)
         self.dropout = nn.Dropout(0.1)
         
     def forward(self, x, num_real_tokens=None):
@@ -142,11 +142,12 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         
         # Router for embedding layer (before first transformer layer)
         embedding_dim = self.model.config.hidden_size
-        self.embedding_router = Router(embedding_dim, len(self.precisions))
+        model_dtype = next(self.model.parameters()).dtype
+        self.embedding_router = Router(embedding_dim, len(self.precisions), dtype=model_dtype)
         
         # Routers for each transformer layer
         for _ in layers:
-            self.routers.append(Router(embedding_dim, len(self.precisions)))
+            self.routers.append(Router(embedding_dim, len(self.precisions), dtype=model_dtype))
 
     def _freeze_original_parameters(self):
         """Freeze all parameters from the original language model."""
