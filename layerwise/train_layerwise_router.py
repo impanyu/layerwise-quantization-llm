@@ -11,8 +11,8 @@ from transformers import AutoTokenizer
 import json
 from datetime import datetime
 
-from LayerwiseQuantizeForCausalLM import LayerwiseQuantizeForCausalLM
-from any_precision.quantization.datautils import get_tokens
+from .LayerwiseQuantizeForCausalLM import LayerwiseQuantizeForCausalLM
+from ..any_precision.quantization.datautils import get_tokens
 
 
 # Setup logging

@@ -14,8 +14,8 @@ from accelerate.big_modeling import (
     load_checkpoint_and_dispatch,
 )
 
-from any_precision.modules.AnyPrecisionLinear import AnyPrecisionLinear
-from any_precision.analyzer.analyzer import get_analyzer
+from ..any_precision.modules.AnyPrecisionLinear import AnyPrecisionLinear
+from ..any_precision.analyzer.analyzer import get_analyzer
 
 
 def replace_module_by_name(layer, module_name, new_module):
