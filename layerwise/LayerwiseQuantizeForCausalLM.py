@@ -35,6 +35,9 @@ def replace_module_by_name(layer, module_name, new_module):
     setattr(module, levels[-1], new_module)
 
 
+
+
+
 class Router(nn.Module):
     """Router network that outputs a one-hot vector for precision selection."""
     def __init__(self, input_dim, num_precisions, hidden_dim=128, dtype=torch.float16):
@@ -196,17 +199,9 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         
         print("✓ Unfrozen original LM parameters")
 
-    def train_forward(self, input_ids, attention_mask=None, return_router_outputs=False, **kwargs):
+    def train_forward(self, input_ids, return_router_outputs=False, **kwargs):
         """Forward pass during training with mixed precision based on router outputs."""
         batch_size, seq_len = input_ids.shape
-        
-        # Handle attention_mask if None
-        if attention_mask is None:
-            # Create attention mask based on non-zero tokens (assuming 0 is padding)
-            attention_mask = (input_ids != 0).long()
-            # Alternative: use model's padding token
-            # pad_token_id = getattr(self.config, 'pad_token_id', 0)
-            # attention_mask = (input_ids != pad_token_id).long()
         
         # Get embedding output
         embeddings = self.model.get_input_embeddings()(input_ids)
@@ -217,8 +212,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         router_outputs = []
         
         for layer_idx, layer in enumerate(layers):
-            # Count real tokens for each sample in the batch
-            num_real_tokens = attention_mask.sum(dim=1)  # [batch_size]
+            # For fixed-length sequences, all tokens are real
+            num_real_tokens = torch.full((batch_size,), seq_len, dtype=torch.long, device=input_ids.device)
             
             # Get router output for this layer
             layer_router_output = self.routers[layer_idx](current_input, num_real_tokens)
@@ -233,7 +228,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                 
                 # Forward through this specific layer
                 with torch.no_grad():
-                    layer_output_precision = layer(current_input, attention_mask=attention_mask)
+                    # For fixed-length sequences, let the model handle causal masking internally
+                    layer_output_precision = layer(current_input)
                 
                 # Mix based on router weights
                 precision_weight = layer_router_output[:, i:i+1].unsqueeze(-1)
@@ -252,17 +248,9 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         else:
             return type('Outputs', (), {'logits': final_output})()
 
-    def infer_forward(self, input_ids, attention_mask=None, **kwargs):
+    def infer_forward(self, input_ids, **kwargs):
         """Forward pass during inference using the precision with maximum router weight."""
         batch_size, seq_len = input_ids.shape
-        
-        # Handle attention_mask if None
-        if attention_mask is None:
-            # Create attention mask based on non-zero tokens (assuming 0 is padding)
-            attention_mask = (input_ids != 0).long()
-            # Alternative: use model's padding token
-            # pad_token_id = getattr(self.config, 'pad_token_id', 0)
-            # attention_mask = (input_ids != pad_token_id).long()
         
         # Get embedding output
         embeddings = self.model.get_input_embeddings()(input_ids)
@@ -272,8 +260,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         layers = self.get_model_layers()
         
         for layer_idx, layer in enumerate(layers):
-            # Count real tokens for each sample in the batch
-            num_real_tokens = attention_mask.sum(dim=1)  # [batch_size]
+            # For fixed-length sequences, all tokens are real
+            num_real_tokens = torch.full((batch_size,), seq_len, dtype=torch.long, device=input_ids.device)
             
             # Get router output for this layer
             layer_router_output = self.routers[layer_idx](current_input, num_real_tokens)
@@ -285,7 +273,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
             # Set precision and forward through layer
             self.set_precision(layer_precision)
             with torch.no_grad():
-                layer_output = layer(current_input, attention_mask=attention_mask)
+                # For fixed-length sequences, let the model handle causal masking internally
+                layer_output = layer(current_input)
             
             if isinstance(layer_output, tuple):
                 current_input = layer_output[0]
@@ -297,9 +286,9 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         
         return type('Outputs', (), {'logits': final_output})()
 
-    def forward(self, *args, **kwargs):
+    def forward(self, input_ids, **kwargs):
         # Default to infer_forward
-        return self.infer_forward(*args, **kwargs)
+        return self.infer_forward(input_ids, **kwargs)
 
     def generate(self, *args, **kwargs):
         """Modified generate method to use infer_forward."""

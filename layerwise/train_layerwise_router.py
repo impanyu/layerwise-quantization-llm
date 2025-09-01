@@ -242,12 +242,11 @@ class RouterTrainer:
         
         for batch_idx, (input_ids, attention_mask) in enumerate(progress_bar):
             input_ids = input_ids.to(self.device)
-            attention_mask = attention_mask.to(self.device)
+            # attention_mask no longer needed for fixed-length sequences
             
             # Forward pass with router outputs collection
             outputs = self.model.train_forward(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
                 return_router_outputs=True
             )
             
