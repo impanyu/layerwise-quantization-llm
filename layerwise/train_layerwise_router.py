@@ -11,8 +11,17 @@ from transformers import AutoTokenizer
 import json
 from datetime import datetime
 
-from .LayerwiseQuantizeForCausalLM import LayerwiseQuantizeForCausalLM
-from ..any_precision.quantization.datautils import get_tokens
+try:
+    # Relative imports (when run as module)
+    from .LayerwiseQuantizeForCausalLM import LayerwiseQuantizeForCausalLM
+    from ..any_precision.quantization.datautils import get_tokens
+except ImportError:
+    # Absolute imports (when run as script)
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from layerwise.LayerwiseQuantizeForCausalLM import LayerwiseQuantizeForCausalLM
+    from any_precision.quantization.datautils import get_tokens
 
 
 # Setup logging
