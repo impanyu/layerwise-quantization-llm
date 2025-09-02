@@ -69,10 +69,12 @@ class Router(nn.Module):
         if torch.isnan(x).any():
             print(f"WARNING: NaN detected in router input, using uniform distribution")
             # Return uniform distribution over precisions instead of propagating NaN
+            # Make sure it requires grad to maintain gradient flow
             batch_size = x.shape[0]
             num_precisions = self.fc3.out_features
-            return torch.full((batch_size, num_precisions), 1.0/num_precisions, 
-                            device=x.device, dtype=x.dtype)
+            uniform_output = torch.full((batch_size, num_precisions), 1.0/num_precisions, 
+                                      device=x.device, dtype=x.dtype, requires_grad=True)
+            return uniform_output
         
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
@@ -86,8 +88,9 @@ class Router(nn.Module):
             print(f"WARNING: NaN detected in router output, using uniform distribution")
             batch_size = x.shape[0]
             num_precisions = x.shape[1]
-            return torch.full((batch_size, num_precisions), 1.0/num_precisions, 
-                            device=x.device, dtype=x.dtype)
+            uniform_output = torch.full((batch_size, num_precisions), 1.0/num_precisions, 
+                                      device=x.device, dtype=x.dtype, requires_grad=True)
+            return uniform_output
             
         return x
 
@@ -257,9 +260,9 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                 self.set_precision(precision)
                 
                 # Forward through this specific layer
-                with torch.no_grad():
-                    # For fixed-length sequences, let the model handle causal masking internally
-                    layer_output_precision = layer(current_input)
+                # Note: Removed torch.no_grad() to allow gradients to flow for router training
+                # For fixed-length sequences, let the model handle causal masking internally
+                layer_output_precision = layer(current_input)
                 
                 # Mix based on router weights
                 precision_weight = layer_router_output[:, i:i+1].unsqueeze(-1)

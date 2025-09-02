@@ -247,14 +247,21 @@ class RouterTrainer:
         normalized_precision = self.normalize_precision_loss(avg_precision)
         precision_loss = torch.mean(normalized_precision)
         
+        # Add router regularization to ensure gradient flow
+        router_reg_loss = 0.0
+        for router_output in router_outputs:
+            # L2 regularization on router outputs to maintain gradient flow
+            router_reg_loss += torch.mean(router_output.pow(2))
+        router_reg_loss = router_reg_loss / len(router_outputs) * 0.001  # Small weight
+        
         # Debug: Check precision loss
         if torch.isnan(precision_loss):
             print("ERROR: NaN detected in precision_loss")
             print(f"precision_loss: {precision_loss}")
             print(f"normalized_precision: {normalized_precision}")
         
-        # Weighted combination
-        total_loss = self.weight_ce * ce_loss + self.weight_precision * precision_loss
+        # Weighted combination with router regularization
+        total_loss = self.weight_ce * ce_loss + self.weight_precision * precision_loss + router_reg_loss
         
         # Debug: Check total loss
         if torch.isnan(total_loss):
@@ -292,6 +299,12 @@ class RouterTrainer:
             loss, ce_loss, precision_loss, avg_precision = self.custom_loss(
                 outputs, input_ids, router_outputs
             )
+            
+            # Check if loss requires grad
+            if not loss.requires_grad:
+                print(f"WARNING: Loss doesn't require grad. CE requires grad: {ce_loss.requires_grad}, Precision requires grad: {precision_loss.requires_grad}")
+                print("Skipping backward pass")
+                continue
             
             # Backward pass
             self.optimizer.zero_grad()
