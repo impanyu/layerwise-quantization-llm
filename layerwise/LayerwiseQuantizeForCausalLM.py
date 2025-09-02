@@ -47,28 +47,52 @@ class Router(nn.Module):
         self.fc3 = nn.Linear(hidden_dim, num_precisions, dtype=dtype)
         self.dropout = nn.Dropout(0.1)
         
+        # Initialize weights to prevent extreme values
+        with torch.no_grad():
+            nn.init.xavier_uniform_(self.fc1.weight, gain=0.1)
+            nn.init.xavier_uniform_(self.fc2.weight, gain=0.1)
+            nn.init.xavier_uniform_(self.fc3.weight, gain=0.1)
+            if self.fc1.bias is not None:
+                nn.init.zeros_(self.fc1.bias)
+            if self.fc2.bias is not None:
+                nn.init.zeros_(self.fc2.bias)
+            if self.fc3.bias is not None:
+                nn.init.zeros_(self.fc3.bias)
+        
     def forward(self, x, num_real_tokens=None):
         # Use mean pooling if input has multiple dimensions
         if x.dim() > 2:
             if num_real_tokens is not None:
-                # Average only over real tokens (not padding)
-                batch_size, seq_len, hidden_dim = x.shape
-                x_reshaped = x.view(batch_size * seq_len, hidden_dim)
-                # Create mask for real tokens
-                real_token_mask = torch.arange(seq_len, device=x.device).unsqueeze(0) < num_real_tokens.unsqueeze(1)
-                real_token_mask = real_token_mask.view(batch_size * seq_len)
-                # Average only real tokens
-                x = x_reshaped[real_token_mask].view(batch_size, -1, hidden_dim).mean(dim=1)
+                # For fixed-length sequences, all tokens are real, so simplify
+                x = x.mean(dim=1)  # Average over sequence length
             else:
                 # Fallback to original behavior
                 x = x.mean(dim=1)  # Average over sequence length
         
+        # Check for NaN in input
+        if torch.isnan(x).any():
+            print(f"ERROR: NaN detected in router input after pooling")
+            print(f"Input shape: {x.shape}, values: {x}")
+        
         x = F.relu(self.fc1(x))
+        if torch.isnan(x).any():
+            print(f"ERROR: NaN detected after fc1")
+            
         x = self.dropout(x)
         x = F.relu(self.fc2(x))
+        if torch.isnan(x).any():
+            print(f"ERROR: NaN detected after fc2")
+            
         x = self.dropout(x)
         x = self.fc3(x)
+        if torch.isnan(x).any():
+            print(f"ERROR: NaN detected after fc3")
+            
         x = F.softmax(x, dim=-1)
+        if torch.isnan(x).any():
+            print(f"ERROR: NaN detected after softmax")
+            print(f"Softmax input was: {self.fc3(self.dropout(F.relu(self.fc2(self.dropout(F.relu(self.fc1(x)))))))}")
+            
         return x
 
 

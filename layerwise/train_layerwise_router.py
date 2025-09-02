@@ -214,18 +214,54 @@ class RouterTrainer:
     
     def custom_loss(self, outputs, labels, router_outputs):
         """Custom loss function combining cross entropy and precision penalty."""
+        # Debug: Check for NaN in outputs
+        if torch.isnan(outputs.logits).any():
+            print("ERROR: NaN detected in model outputs.logits")
+            print(f"Logits shape: {outputs.logits.shape}")
+            print(f"Logits min: {outputs.logits.min()}, max: {outputs.logits.max()}")
+        
         # Cross entropy loss
         ce_loss = nn.CrossEntropyLoss()(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
         
+        # Debug: Check CE loss
+        if torch.isnan(ce_loss):
+            print("ERROR: NaN detected in CE loss")
+            print(f"CE loss: {ce_loss}")
+        
+        # Debug: Check router outputs
+        for i, router_output in enumerate(router_outputs):
+            if torch.isnan(router_output).any():
+                print(f"ERROR: NaN detected in router_outputs[{i}]")
+                print(f"Router output shape: {router_output.shape}")
+                print(f"Router output: {router_output}")
+        
         # Calculate average precision
         avg_precision = self.calculate_average_precision(router_outputs)
+        
+        # Debug: Check avg precision
+        if torch.isnan(avg_precision).any():
+            print("ERROR: NaN detected in avg_precision")
+            print(f"avg_precision: {avg_precision}")
         
         # Normalize precision loss
         normalized_precision = self.normalize_precision_loss(avg_precision)
         precision_loss = torch.mean(normalized_precision)
         
+        # Debug: Check precision loss
+        if torch.isnan(precision_loss):
+            print("ERROR: NaN detected in precision_loss")
+            print(f"precision_loss: {precision_loss}")
+            print(f"normalized_precision: {normalized_precision}")
+        
         # Weighted combination
         total_loss = self.weight_ce * ce_loss + self.weight_precision * precision_loss
+        
+        # Debug: Check total loss
+        if torch.isnan(total_loss):
+            print("ERROR: NaN detected in total_loss")
+            print(f"total_loss: {total_loss}")
+            print(f"ce_loss: {ce_loss}, precision_loss: {precision_loss}")
+            print(f"weights: ce={self.weight_ce}, precision={self.weight_precision}")
         
         return total_loss, ce_loss, precision_loss, torch.mean(avg_precision)
     
@@ -260,6 +296,10 @@ class RouterTrainer:
             # Backward pass
             self.optimizer.zero_grad()
             loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), max_norm=1.0)
+            
             self.optimizer.step()
             
             # Update statistics
