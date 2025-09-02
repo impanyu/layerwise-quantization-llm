@@ -303,7 +303,7 @@ class RouterTrainer:
             print(f"normalized_precision: {normalized_precision}")
         
         # Weighted combination with router regularization
-        total_loss = self.weight_ce * ce_loss #+ self.weight_precision * precision_loss 
+        total_loss = self.weight_ce * ce_loss + self.weight_precision * precision_loss 
         # Debug: Check total loss
         if torch.isnan(total_loss):
             print("ERROR: NaN detected in total_loss")
