@@ -401,6 +401,10 @@ class RouterTrainer:
         num_batches = 0
         sample_router_outputs = None
         
+        # Randomly select a batch index to sample router outputs from
+        total_val_batches = len(self.val_dataloader)
+        random_batch_idx = np.random.randint(0, total_val_batches) if total_val_batches > 0 else 0
+        
         with torch.no_grad():
             for batch_idx, (input_ids, attention_mask) in enumerate(self.val_dataloader):
                 input_ids = input_ids.to(self.device)
@@ -413,9 +417,9 @@ class RouterTrainer:
                 
                 router_outputs = outputs.router_outputs
                 
-                # Sample router outputs from the first batch for logging
-                if batch_idx == 0:
-                    sample_router_outputs = self._sample_router_outputs_for_logging(router_outputs, epoch)
+                # Sample router outputs from the randomly selected batch for logging
+                if batch_idx == random_batch_idx:
+                    sample_router_outputs = self._sample_router_outputs_for_logging(router_outputs, epoch, batch_idx)
                 
                 # Calculate loss using the same custom loss function
                 # Router outputs are now one-hot vectors representing selected precisions
@@ -438,7 +442,7 @@ class RouterTrainer:
         
         return avg_loss, avg_ce_loss, avg_precision_loss, avg_precision, sample_router_outputs
     
-    def _sample_router_outputs_for_logging(self, router_outputs, epoch):
+    def _sample_router_outputs_for_logging(self, router_outputs, epoch, batch_idx=None):
         """Sample and format router outputs for logging."""
         num_layers = len(router_outputs)
         sampled_outputs = []
@@ -461,13 +465,14 @@ class RouterTrainer:
             sampled_outputs.append(layer_info)
         
         # Log the router outputs
-        self._log_router_outputs(epoch, sampled_outputs)
+        self._log_router_outputs(epoch, sampled_outputs, batch_idx)
         
         return sampled_outputs
     
-    def _log_router_outputs(self, epoch, sampled_outputs):
+    def _log_router_outputs(self, epoch, sampled_outputs, batch_idx=None):
         """Log router outputs in a readable format."""
-        logging.info(f"\n--- Validation Router Outputs (Epoch {epoch+1}) ---")
+        batch_info = f" (Batch {batch_idx})" if batch_idx is not None else ""
+        logging.info(f"\n--- Validation Router Outputs (Epoch {epoch+1}{batch_info}) ---")
         
         # Create a summary line showing selected precisions for all layers
         selected_precisions = [layer['selected_precision'] for layer in sampled_outputs]
@@ -487,15 +492,16 @@ class RouterTrainer:
         logging.info("--- End Router Outputs ---\n")
         
         # Also save to file for later analysis
-        self._save_router_outputs_to_file(epoch, sampled_outputs)
+        self._save_router_outputs_to_file(epoch, sampled_outputs, batch_idx)
     
-    def _save_router_outputs_to_file(self, epoch, sampled_outputs):
+    def _save_router_outputs_to_file(self, epoch, sampled_outputs, batch_idx=None):
         """Save router outputs to a JSON file for analysis."""
         router_log_path = os.path.join(self.save_dir, 'validation_router_outputs.jsonl')
         
         # Create entry for this epoch
         epoch_entry = {
             'epoch': epoch + 1,
+            'sampled_batch': batch_idx,
             'layers': sampled_outputs,
             'summary': {
                 'selected_precisions': [layer['selected_precision'] for layer in sampled_outputs],

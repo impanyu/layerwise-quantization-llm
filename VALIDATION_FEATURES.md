@@ -120,10 +120,11 @@ Final Results:
 ```
 
 ### 3. `validation_router_outputs.jsonl`
-Detailed router outputs for each layer during validation (one entry per epoch):
+Detailed router outputs for each layer during validation (one entry per epoch, sampled from random batch):
 ```json
 {
   "epoch": 1,
+  "sampled_batch": 3,
   "layers": [
     {
       "layer": 0,
