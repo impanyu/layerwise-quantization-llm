@@ -208,7 +208,8 @@ class RouterTrainer:
         # Normalize to [0, 1] then scale to typical CE range
         normalized = (avg_precision - min_precision) / (max_precision - min_precision)
         # Scale to typical CE range (0-10)
-        scaled = normalized * 100.0
+        scaled = normalized * 200.0
+        
         
         return scaled
     
@@ -461,8 +462,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs")
-    parser.add_argument("--weight_ce", type=float, default=0.7, help="Weight for cross entropy loss")
-    parser.add_argument("--weight_precision", type=float, default=0.3, help="Weight for precision loss")
+    parser.add_argument("--weight_ce", type=float, default=0.1, help="Weight for cross entropy loss")
+    parser.add_argument("--weight_precision", type=float, default=0.9, help="Weight for precision loss")
     parser.add_argument("--save_dir", type=str, default="router_checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/cpu)")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed")

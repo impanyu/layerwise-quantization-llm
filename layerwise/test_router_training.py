@@ -13,6 +13,7 @@ import numpy as np
 from train_layerwise_router import RouterTrainer
 
 
+
 def test_router_architecture():
     """Test the Router architecture."""
     print("Testing Router architecture...")
