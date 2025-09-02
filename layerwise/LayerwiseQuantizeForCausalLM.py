@@ -344,7 +344,7 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         else:
             return type('Outputs', (), {'logits': final_output})()
 
-    def infer_forward(self, input_ids, **kwargs):
+    def infer_forward(self, input_ids, return_router_outputs=False, **kwargs):
         """Forward pass during inference using the precision with maximum router weight."""
         batch_size, seq_len = input_ids.shape
         
@@ -354,6 +354,7 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         
         # Process through each transformer layer
         layers = self.get_model_layers()
+        router_outputs = [] if return_router_outputs else None
         
         for layer_idx, layer in enumerate(layers):
             # For fixed-length sequences, all tokens are real
@@ -365,6 +366,13 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
             # Use maximum precision among all batches for highest quality
             layer_precision_idx = torch.max(layer_precision_idx).item()
             layer_precision = self.precisions[layer_precision_idx]
+            
+            # Convert selected precision to one-hot vector for consistency with train_forward
+            if return_router_outputs:
+                # Create one-hot vector representing the selected precision
+                one_hot_output = torch.zeros_like(layer_router_output)
+                one_hot_output[:, layer_precision_idx] = 1.0
+                router_outputs.append(one_hot_output)
             
             # Set precision and forward through layer
             self.set_precision(layer_precision)
@@ -380,7 +388,10 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         # Final output through lm_head
         final_output = self.model.lm_head(current_input)
         
-        return type('Outputs', (), {'logits': final_output})()
+        if return_router_outputs:
+            return type('Outputs', (), {'logits': final_output, 'router_outputs': router_outputs})()
+        else:
+            return type('Outputs', (), {'logits': final_output})()
 
     def forward(self, input_ids, **kwargs):
         # Default to infer_forward

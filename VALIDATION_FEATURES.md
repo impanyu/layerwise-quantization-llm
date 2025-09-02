@@ -119,7 +119,29 @@ Final Results:
   - Final validation avg precision: 6.5
 ```
 
-### 3. Checkpoint Files
+### 3. `validation_router_outputs.jsonl`
+Detailed router outputs for each layer during validation (one entry per epoch):
+```json
+{
+  "epoch": 1,
+  "layers": [
+    {
+      "layer": 0,
+      "selected_precision": 6,
+      "precision_idx": 3,
+      "router_output": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    },
+    // ... more layers
+  ],
+  "summary": {
+    "selected_precisions": [6, 4, 8, 6, ...],
+    "avg_precision": 6.2,
+    "precision_distribution": {"4": 5, "6": 10, "8": 3}
+  }
+}
+```
+
+### 4. Checkpoint Files
 - `best_router_checkpoint.pt`: Best model based on validation loss
 - `router_checkpoint_epoch_N.pt`: Checkpoint for each epoch
 
@@ -150,6 +172,19 @@ Use the provided example script to visualize training progress:
 # See example_router_training_with_validation.py
 plot_training_history('router_checkpoints')
 ```
+
+### Analyzing Router Outputs
+Use the provided analysis script to understand router behavior:
+
+```bash
+python analyze_router_outputs.py router_checkpoints/validation_router_outputs.jsonl --save-plots ./plots
+```
+
+This will show:
+- How precision selection evolves over training
+- Which layers prefer which precisions
+- Precision distribution across layers
+- Layer-wise consistency patterns
 
 ## Best Practices
 

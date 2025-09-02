@@ -391,28 +391,34 @@ class RouterTrainer:
         
         return avg_loss, avg_ce_loss, avg_precision_loss, avg_precision
     
-    def validate_epoch(self):
-        """Validate for one epoch."""
+    def validate_epoch(self, epoch):
+        """Validate for one epoch using inference mode."""
         self.model.eval()
         total_loss = 0.0
         total_ce_loss = 0.0
         total_precision_loss = 0.0
         total_avg_precision = 0.0
         num_batches = 0
+        sample_router_outputs = None
         
         with torch.no_grad():
             for batch_idx, (input_ids, attention_mask) in enumerate(self.val_dataloader):
                 input_ids = input_ids.to(self.device)
                 
-                # Forward pass with router outputs collection
-                outputs = self.model.train_forward(
+                # Use infer_forward with router outputs for realistic validation
+                outputs = self.model.infer_forward(
                     input_ids=input_ids,
                     return_router_outputs=True
                 )
                 
                 router_outputs = outputs.router_outputs
                 
-                # Calculate loss
+                # Sample router outputs from the first batch for logging
+                if batch_idx == 0:
+                    sample_router_outputs = self._sample_router_outputs_for_logging(router_outputs, epoch)
+                
+                # Calculate loss using the same custom loss function
+                # Router outputs are now one-hot vectors representing selected precisions
                 loss, ce_loss, precision_loss, avg_precision = self.custom_loss(
                     outputs, input_ids, router_outputs
                 )
@@ -430,7 +436,84 @@ class RouterTrainer:
         avg_precision_loss = total_precision_loss / num_batches if num_batches > 0 else 0.0
         avg_precision = total_avg_precision / num_batches if num_batches > 0 else 0.0
         
-        return avg_loss, avg_ce_loss, avg_precision_loss, avg_precision
+        return avg_loss, avg_ce_loss, avg_precision_loss, avg_precision, sample_router_outputs
+    
+    def _sample_router_outputs_for_logging(self, router_outputs, epoch):
+        """Sample and format router outputs for logging."""
+        num_layers = len(router_outputs)
+        sampled_outputs = []
+        
+        # Take the first sample from the batch (index 0) for each layer
+        for layer_idx in range(num_layers):
+            layer_output = router_outputs[layer_idx][0]  # Shape: [num_precisions]
+            
+            # Find the selected precision (argmax of one-hot vector)
+            selected_precision_idx = torch.argmax(layer_output).item()
+            selected_precision = self.model.precisions[selected_precision_idx]
+            
+            # Create a formatted output for this layer
+            layer_info = {
+                'layer': layer_idx,
+                'selected_precision': selected_precision,
+                'precision_idx': selected_precision_idx,
+                'router_output': layer_output.cpu().numpy().tolist()
+            }
+            sampled_outputs.append(layer_info)
+        
+        # Log the router outputs
+        self._log_router_outputs(epoch, sampled_outputs)
+        
+        return sampled_outputs
+    
+    def _log_router_outputs(self, epoch, sampled_outputs):
+        """Log router outputs in a readable format."""
+        logging.info(f"\n--- Validation Router Outputs (Epoch {epoch+1}) ---")
+        
+        # Create a summary line showing selected precisions for all layers
+        selected_precisions = [layer['selected_precision'] for layer in sampled_outputs]
+        logging.info(f"Selected precisions by layer: {selected_precisions}")
+        
+        # Log detailed information for each layer
+        for layer_info in sampled_outputs:
+            layer_idx = layer_info['layer']
+            selected_prec = layer_info['selected_precision']
+            precision_idx = layer_info['precision_idx']
+            
+            # Format router output (show which precision was selected)
+            router_str = f"[{', '.join(['1.0' if i == precision_idx else '0.0' for i in range(len(self.model.precisions))])}]"
+            
+            logging.info(f"  Layer {layer_idx:2d}: precision {selected_prec}-bit (idx {precision_idx}) -> {router_str}")
+        
+        logging.info("--- End Router Outputs ---\n")
+        
+        # Also save to file for later analysis
+        self._save_router_outputs_to_file(epoch, sampled_outputs)
+    
+    def _save_router_outputs_to_file(self, epoch, sampled_outputs):
+        """Save router outputs to a JSON file for analysis."""
+        router_log_path = os.path.join(self.save_dir, 'validation_router_outputs.jsonl')
+        
+        # Create entry for this epoch
+        epoch_entry = {
+            'epoch': epoch + 1,
+            'layers': sampled_outputs,
+            'summary': {
+                'selected_precisions': [layer['selected_precision'] for layer in sampled_outputs],
+                'avg_precision': np.mean([layer['selected_precision'] for layer in sampled_outputs]),
+                'precision_distribution': {
+                    str(prec): sum(1 for layer in sampled_outputs if layer['selected_precision'] == prec)
+                    for prec in self.model.precisions
+                }
+            }
+        }
+        
+        # Append to JSONL file (one JSON object per line)
+        with open(router_log_path, 'a') as f:
+            json.dump(epoch_entry, f)
+            f.write('\n')
+        
+        if epoch == 0:  # Only log on first epoch to avoid spam
+            logging.info(f"Router outputs being saved to: {router_log_path}")
     
     def save_checkpoint(self, epoch, metrics):
         """Save model checkpoint."""
@@ -491,7 +574,8 @@ class RouterTrainer:
                 f.write(f"  - Final validation loss: {self.train_history['val_total_loss'][-1]:.4f}\n")
                 f.write(f"  - Best validation loss: {min(self.train_history['val_total_loss']):.4f}\n")
                 f.write(f"  - Final training avg precision: {self.train_history['train_avg_precision'][-1]:.2f}\n")
-                f.write(f"  - Final validation avg precision: {self.train_history['val_avg_precision'][-1]:.2f}\n")
+                f.write(f"  - Final validation avg selected precision: {self.train_history['val_avg_precision'][-1]:.2f}\n")
+                f.write(f"\nNote: Validation uses inference mode with one-hot precision selection\n")
         
         logging.info(f"Training summary saved: {summary_path}")
     
@@ -521,7 +605,7 @@ class RouterTrainer:
             train_avg_loss, train_avg_ce_loss, train_avg_precision_loss, train_avg_precision = self.train_epoch(epoch)
             
             # Validate for one epoch
-            val_avg_loss, val_avg_ce_loss, val_avg_precision_loss, val_avg_precision = self.validate_epoch()
+            val_avg_loss, val_avg_ce_loss, val_avg_precision_loss, val_avg_precision, sample_router_outputs = self.validate_epoch(epoch)
             
             # Log metrics
             logging.info(f"Epoch {epoch+1} Results:")
@@ -530,11 +614,11 @@ class RouterTrainer:
             logging.info(f"    - CE Loss: {train_avg_ce_loss:.4f}")
             logging.info(f"    - Precision Loss: {train_avg_precision_loss:.4f}")
             logging.info(f"    - Average Precision: {train_avg_precision:.2f}")
-            logging.info(f"  Validation:")
+            logging.info(f"  Validation (inference mode):")
             logging.info(f"    - Total Loss: {val_avg_loss:.4f}")
             logging.info(f"    - CE Loss: {val_avg_ce_loss:.4f}")
             logging.info(f"    - Precision Loss: {val_avg_precision_loss:.4f}")
-            logging.info(f"    - Average Precision: {val_avg_precision:.2f}")
+            logging.info(f"    - Avg Selected Precision: {val_avg_precision:.2f}")
             
             # Save to history
             self.train_history['epoch'].append(epoch + 1)
@@ -593,6 +677,7 @@ class RouterTrainer:
         logging.info(f"Best validation loss: {best_loss:.4f}")
         logging.info(f"Checkpoints saved in: {self.save_dir}")
         logging.info(f"Training history saved as: {os.path.join(self.save_dir, 'training_history.json')}")
+        logging.info(f"Router outputs saved as: {os.path.join(self.save_dir, 'validation_router_outputs.jsonl')}")
 
 
 def main():
