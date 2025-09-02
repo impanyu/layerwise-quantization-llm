@@ -35,6 +35,52 @@ def replace_module_by_name(layer, module_name, new_module):
     setattr(module, levels[-1], new_module)
 
 
+def sparsemax(input, dim=-1):
+    """Sparsemax activation function.
+    
+    Sparsemax is a sparse alternative to softmax that can produce exactly zero probabilities.
+    This encourages the router to select fewer precisions, leading to more efficient inference.
+    
+    Reference: "From Softmax to Sparsemax: A Sparse Model of Attention and Multi-Label Classification"
+    https://arxiv.org/abs/1602.02068
+    
+    Args:
+        input: Input tensor of any shape
+        dim: Dimension along which sparsemax will be computed
+        
+    Returns:
+        Tensor of same shape as input with sparsemax applied along dim
+    """
+    # Translate input by max for numerical stability
+    input_shifted = input - torch.max(input, dim=dim, keepdim=True)[0]
+    
+    # Sort input in descending order
+    zs_sorted, _ = torch.sort(input_shifted, dim=dim, descending=True)
+    
+    # Calculate cumulative sums
+    range_tensor = torch.arange(1, input.size(dim) + 1, dtype=input.dtype, device=input.device)
+    if dim != -1 and dim != input.dim() - 1:
+        # Reshape range_tensor to broadcast correctly
+        shape = [1] * input.dim()
+        shape[dim] = input.size(dim)
+        range_tensor = range_tensor.view(shape)
+    
+    cumsum = torch.cumsum(zs_sorted, dim=dim)
+    
+    # Find the threshold k
+    condition = 1 + range_tensor * zs_sorted > cumsum
+    k = torch.sum(condition, dim=dim, keepdim=True)
+    
+    # Calculate tau (threshold)
+    k_broadcast = k.expand_as(cumsum)
+    tau = (torch.gather(cumsum, dim, k - 1) - 1) / k.float()
+    
+    # Apply sparsemax transformation
+    output = torch.clamp(input_shifted - tau, min=0)
+    
+    return output
+
+
 
 
 
@@ -91,12 +137,12 @@ class Router(nn.Module):
         x = self.dropout(x)
         x = self.fc3(x)
         
-        # Check for extreme values before softmax
+        # Check for extreme values before sparsemax
         if torch.isinf(x).any() or x.abs().max() > 50:
-            print(f"WARNING: Extreme values before softmax: min={x.min()}, max={x.max()}")
+            print(f"WARNING: Extreme values before sparsemax: min={x.min()}, max={x.max()}")
         
-        # Softmax in float32 for numerical stability
-        x = F.softmax(x, dim=-1)
+        # Sparsemax in float32 for numerical stability and sparsity
+        x = sparsemax(x, dim=-1)
         
         # Final safety check
         if torch.isnan(x).any():
