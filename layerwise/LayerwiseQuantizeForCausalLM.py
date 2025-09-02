@@ -60,14 +60,16 @@ class Router(nn.Module):
                 nn.init.zeros_(self.fc3.bias)
         
     def forward(self, x, num_real_tokens=None):
+        # Debug: Print initial input shape
+        print(f"Router input shape: {x.shape}")
+        
         # Use mean pooling if input has multiple dimensions
         if x.dim() > 2:
-            if num_real_tokens is not None:
-                # For fixed-length sequences, all tokens are real, so simplify
-                x = x.mean(dim=1)  # Average over sequence length
-            else:
-                # Fallback to original behavior
-                x = x.mean(dim=1)  # Average over sequence length
+            # x should be (batch_size, seq_len, hidden_dim)
+            x = x.mean(dim=1)  # Average over sequence length -> (batch_size, hidden_dim)
+        
+        print(f"Router input after pooling: {x.shape}")
+        print(f"Expected fc1 input: {self.fc1.weight.shape}")
         
         # Check for NaN in input
         if torch.isnan(x).any():
@@ -91,7 +93,6 @@ class Router(nn.Module):
         x = F.softmax(x, dim=-1)
         if torch.isnan(x).any():
             print(f"ERROR: NaN detected after softmax")
-            print(f"Softmax input was: {self.fc3(self.dropout(F.relu(self.fc2(self.dropout(F.relu(self.fc1(x)))))))}")
             
         return x
 
@@ -230,18 +231,24 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         # Get embedding output
         embeddings = self.model.get_input_embeddings()(input_ids)
         current_input = embeddings
+        print(f"Initial embeddings shape: {current_input.shape}")
+        print(f"Expected hidden size: {self.model.config.hidden_size}")
         
         # Process through each transformer layer with its own router
         layers = self.get_model_layers()
         router_outputs = []
         
         for layer_idx, layer in enumerate(layers):
+            # Debug: Print current input shape
+            print(f"Layer {layer_idx}: current_input shape = {current_input.shape}")
+            
             # For fixed-length sequences, all tokens are real
             num_real_tokens = torch.full((batch_size,), seq_len, dtype=torch.long, device=input_ids.device)
             
             # Get router output for this layer
             layer_router_output = self.routers[layer_idx](current_input, num_real_tokens)
             router_outputs.append(layer_router_output)
+            print(f"Router output shape: {layer_router_output.shape}")
             
             # Initialize layer output
             layer_output = torch.zeros_like(current_input)
@@ -263,6 +270,7 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                     layer_output += precision_weight * layer_output_precision
             
             current_input = layer_output
+            print(f"Layer {layer_idx} output shape: {current_input.shape}")
         
         # Final output processing through lm_head
         final_output = self.model.lm_head(current_input)
