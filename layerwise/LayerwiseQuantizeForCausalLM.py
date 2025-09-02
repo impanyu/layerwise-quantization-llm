@@ -260,10 +260,11 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                 self.set_precision(precision)
                 
                 # Forward through this specific layer
-                # Note: Removed torch.no_grad() to allow gradients to flow for router training
-                # For fixed-length sequences, let the model handle causal masking internally
-                layer_output_precision = layer(current_input)
+                # Use no_grad for transformer layers to save memory, but allow gradients for router mixing
+                with torch.no_grad():
+                    layer_output_precision = layer(current_input)
                 
+      
                 # Mix based on router weights
                 precision_weight = layer_router_output[:, i:i+1].unsqueeze(-1)
                 if isinstance(layer_output_precision, tuple):
