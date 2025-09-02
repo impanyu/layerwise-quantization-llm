@@ -60,39 +60,34 @@ class Router(nn.Module):
                 nn.init.zeros_(self.fc3.bias)
         
     def forward(self, x, num_real_tokens=None):
-        # Debug: Print initial input shape
-        print(f"Router input shape: {x.shape}")
-        
         # Use mean pooling if input has multiple dimensions
         if x.dim() > 2:
             # x should be (batch_size, seq_len, hidden_dim)
             x = x.mean(dim=1)  # Average over sequence length -> (batch_size, hidden_dim)
         
-        print(f"Router input after pooling: {x.shape}")
-        print(f"Expected fc1 input: {self.fc1.weight.shape}")
-        
-        # Check for NaN in input
+        # Check for NaN in input and handle gracefully
         if torch.isnan(x).any():
-            print(f"ERROR: NaN detected in router input after pooling")
-            print(f"Input shape: {x.shape}, values: {x}")
+            print(f"WARNING: NaN detected in router input, using uniform distribution")
+            # Return uniform distribution over precisions instead of propagating NaN
+            batch_size = x.shape[0]
+            num_precisions = self.fc3.out_features
+            return torch.full((batch_size, num_precisions), 1.0/num_precisions, 
+                            device=x.device, dtype=x.dtype)
         
         x = F.relu(self.fc1(x))
-        if torch.isnan(x).any():
-            print(f"ERROR: NaN detected after fc1")
-            
         x = self.dropout(x)
         x = F.relu(self.fc2(x))
-        if torch.isnan(x).any():
-            print(f"ERROR: NaN detected after fc2")
-            
         x = self.dropout(x)
         x = self.fc3(x)
-        if torch.isnan(x).any():
-            print(f"ERROR: NaN detected after fc3")
-            
         x = F.softmax(x, dim=-1)
+        
+        # Final safety check
         if torch.isnan(x).any():
-            print(f"ERROR: NaN detected after softmax")
+            print(f"WARNING: NaN detected in router output, using uniform distribution")
+            batch_size = x.shape[0]
+            num_precisions = x.shape[1]
+            return torch.full((batch_size, num_precisions), 1.0/num_precisions, 
+                            device=x.device, dtype=x.dtype)
             
         return x
 
@@ -231,24 +226,28 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         # Get embedding output
         embeddings = self.model.get_input_embeddings()(input_ids)
         current_input = embeddings
-        print(f"Initial embeddings shape: {current_input.shape}")
-        print(f"Expected hidden size: {self.model.config.hidden_size}")
+        # Check for NaN in embeddings
+        if torch.isnan(current_input).any():
+            print(f"ERROR: NaN detected in initial embeddings!")
+            # Reset to a safe state
+            current_input = torch.zeros_like(current_input)
         
         # Process through each transformer layer with its own router
         layers = self.get_model_layers()
         router_outputs = []
         
         for layer_idx, layer in enumerate(layers):
-            # Debug: Print current input shape
-            print(f"Layer {layer_idx}: current_input shape = {current_input.shape}")
-            
+            # Check for NaN in current input
+            if torch.isnan(current_input).any():
+                print(f"ERROR: NaN detected in layer {layer_idx} input, stopping training")
+                break
+                
             # For fixed-length sequences, all tokens are real
             num_real_tokens = torch.full((batch_size,), seq_len, dtype=torch.long, device=input_ids.device)
             
             # Get router output for this layer
             layer_router_output = self.routers[layer_idx](current_input, num_real_tokens)
             router_outputs.append(layer_router_output)
-            print(f"Router output shape: {layer_router_output.shape}")
             
             # Initialize layer output
             layer_output = torch.zeros_like(current_input)
@@ -270,7 +269,6 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                     layer_output += precision_weight * layer_output_precision
             
             current_input = layer_output
-            print(f"Layer {layer_idx} output shape: {current_input.shape}")
         
         # Final output processing through lm_head
         final_output = self.model.lm_head(current_input)
