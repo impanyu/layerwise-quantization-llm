@@ -68,6 +68,7 @@ class Router(nn.Module):
         # Check for NaN in input and handle gracefully
         if torch.isnan(x).any():
             print(f"WARNING: NaN detected in router input, using uniform distribution")
+            print(f"Input stats: min={x.min()}, max={x.max()}, mean={x.mean()}")
             # Return uniform distribution over precisions instead of propagating NaN
             # Make sure it requires grad to maintain gradient flow
             batch_size = x.shape[0]
@@ -81,6 +82,11 @@ class Router(nn.Module):
         x = F.relu(self.fc2(x))
         x = self.dropout(x)
         x = self.fc3(x)
+        
+        # Check for extreme values before softmax
+        if torch.isinf(x).any() or x.abs().max() > 50:
+            print(f"WARNING: Extreme values before softmax: min={x.min()}, max={x.max()}")
+        
         x = F.softmax(x, dim=-1)
         
         # Final safety check

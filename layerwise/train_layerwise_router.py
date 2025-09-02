@@ -311,7 +311,7 @@ class RouterTrainer:
             loss.backward()
             
             # Gradient clipping to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), max_norm=0.1)
+            #torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), max_norm=0.1)
             
             # Check for NaN in gradients before optimizer step
             has_nan_grad = False
