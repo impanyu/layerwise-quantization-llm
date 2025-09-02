@@ -40,11 +40,13 @@ def replace_module_by_name(layer, module_name, new_module):
 
 class Router(nn.Module):
     """Router network that outputs a one-hot vector for precision selection."""
-    def __init__(self, input_dim, num_precisions, hidden_dim=128, dtype=torch.float16):
+    def __init__(self, input_dim, num_precisions, hidden_dim=128, dtype=None):
         super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim, dtype=dtype)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim, dtype=dtype)
-        self.fc3 = nn.Linear(hidden_dim, num_precisions, dtype=dtype)
+        # Always use float32 for router parameters to avoid numerical instability
+        # Ignore the dtype parameter - router always uses float32 internally
+        self.fc1 = nn.Linear(input_dim, hidden_dim, dtype=torch.float32)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim, dtype=torch.float32)
+        self.fc3 = nn.Linear(hidden_dim, num_precisions, dtype=torch.float32)
         self.dropout = nn.Dropout(0.1)
         
         # Initialize weights to prevent extreme values
@@ -65,6 +67,9 @@ class Router(nn.Module):
             # x should be (batch_size, seq_len, hidden_dim)
             x = x.mean(dim=1)  # Average over sequence length -> (batch_size, hidden_dim)
         
+        # Store original dtype to convert back at the end
+        original_dtype = x.dtype
+        
         # Check for NaN in input and handle gracefully
         if torch.isnan(x).any():
             print(f"WARNING: NaN detected in router input, using uniform distribution")
@@ -74,12 +79,11 @@ class Router(nn.Module):
             batch_size = x.shape[0]
             num_precisions = self.fc3.out_features
             uniform_output = torch.full((batch_size, num_precisions), 1.0/num_precisions, 
-                                      device=x.device, dtype=x.dtype, requires_grad=True)
+                                      device=x.device, dtype=original_dtype, requires_grad=True)
             return uniform_output
         
-        # Convert to float32 for numerical stability in computations
-        original_dtype = x.dtype
-        x = x.float()  # Convert to float32
+        # Convert to float32 for computation (router weights are already float32)
+        x = x.float()
         
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
@@ -91,11 +95,8 @@ class Router(nn.Module):
         if torch.isinf(x).any() or x.abs().max() > 50:
             print(f"WARNING: Extreme values before softmax: min={x.min()}, max={x.max()}")
         
-        # Use numerically stable softmax in float32
+        # Softmax in float32 for numerical stability
         x = F.softmax(x, dim=-1)
-        
-        # Convert back to original dtype before returning
-        x = x.to(original_dtype)
         
         # Final safety check
         if torch.isnan(x).any():
@@ -105,8 +106,9 @@ class Router(nn.Module):
             uniform_output = torch.full((batch_size, num_precisions), 1.0/num_precisions, 
                                       device=x.device, dtype=original_dtype, requires_grad=True)
             return uniform_output
-            
-        return x
+        
+        # Convert back to original dtype (float16) for compatibility with model
+        return x.to(original_dtype)
 
 
 class LayerwiseQuantizeForCausalLM(nn.Module):
@@ -183,11 +185,11 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         # Router for embedding layer (before first transformer layer)
         embedding_dim = self.model.config.hidden_size
         model_dtype = next(self.model.parameters()).dtype
-        self.embedding_router = Router(embedding_dim, len(self.precisions), dtype=model_dtype)
+        self.embedding_router = Router(embedding_dim, len(self.precisions))
         
         # Routers for each transformer layer
         for _ in layers:
-            self.routers.append(Router(embedding_dim, len(self.precisions), dtype=model_dtype))
+            self.routers.append(Router(embedding_dim, len(self.precisions)))
 
     def _freeze_original_parameters(self):
         """Freeze all parameters from the original language model."""
