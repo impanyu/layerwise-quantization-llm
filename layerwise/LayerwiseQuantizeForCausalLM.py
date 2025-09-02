@@ -77,6 +77,10 @@ class Router(nn.Module):
                                       device=x.device, dtype=x.dtype, requires_grad=True)
             return uniform_output
         
+        # Convert to float32 for numerical stability in computations
+        original_dtype = x.dtype
+        x = x.float()  # Convert to float32
+        
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
         x = F.relu(self.fc2(x))
@@ -87,7 +91,11 @@ class Router(nn.Module):
         if torch.isinf(x).any() or x.abs().max() > 50:
             print(f"WARNING: Extreme values before softmax: min={x.min()}, max={x.max()}")
         
+        # Use numerically stable softmax in float32
         x = F.softmax(x, dim=-1)
+        
+        # Convert back to original dtype before returning
+        x = x.to(original_dtype)
         
         # Final safety check
         if torch.isnan(x).any():
@@ -95,7 +103,7 @@ class Router(nn.Module):
             batch_size = x.shape[0]
             num_precisions = x.shape[1]
             uniform_output = torch.full((batch_size, num_precisions), 1.0/num_precisions, 
-                                      device=x.device, dtype=x.dtype, requires_grad=True)
+                                      device=x.device, dtype=original_dtype, requires_grad=True)
             return uniform_output
             
         return x
