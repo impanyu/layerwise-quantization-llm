@@ -44,7 +44,9 @@ class RouterTrainer:
         device='cuda' if torch.cuda.is_available() else 'cpu',
         random_state=42,
         trust_remote_code=True,
-        precisions=None
+        precisions=None,
+        validation_split=0.2,
+        validation_examples=None
     ):
         self.model_path = model_path
         self.dataset = dataset
@@ -60,6 +62,8 @@ class RouterTrainer:
         self.random_state = random_state
         self.trust_remote_code = trust_remote_code
         self.precisions = precisions
+        self.validation_split = validation_split
+        self.validation_examples = validation_examples
         
         # Validate weights
         assert abs(self.weight_ce + self.weight_precision - 1.0) < 1e-6, \
@@ -76,10 +80,14 @@ class RouterTrainer:
         # Training history
         self.train_history = {
             'epoch': [],
-            'total_loss': [],
-            'ce_loss': [],
-            'precision_loss': [],
-            'avg_precision': []
+            'train_total_loss': [],
+            'train_ce_loss': [],
+            'train_precision_loss': [],
+            'train_avg_precision': [],
+            'val_total_loss': [],
+            'val_ce_loss': [],
+            'val_precision_loss': [],
+            'val_avg_precision': []
         }
     
     def setup_model(self):
@@ -110,24 +118,72 @@ class RouterTrainer:
         logging.info(f"Number of trainable parameters: {sum(p.numel() for p in self.model.get_trainable_parameters())}")
     
     def setup_data(self):
-        """Setup training data using the same mechanism as quantize.py."""
+        """Setup training and validation data using the same mechanism as quantize.py."""
         logging.info(f"Loading dataset: {self.dataset}")
         
-        # Get tokens using the same function as quantize.py
-        input_tokens = get_tokens(
+        # Calculate number of training and validation examples
+        if self.validation_examples is None:
+            val_examples = int(self.num_examples * self.validation_split)
+            train_examples = self.num_examples
+        else:
+            train_examples = self.num_examples
+            val_examples = self.validation_examples
+        
+        # Load training data from 'train' split
+        logging.info(f"Loading {train_examples} training examples from 'train' split")
+        train_tokens = get_tokens(
             self.dataset, 
             'train', 
             self.tokenizer, 
             self.seq_len, 
-            self.num_examples, 
+            train_examples, 
             seed=self.random_state
         )
         
-        # Convert to tensors and create attention masks
+        # Load validation data from 'validation' split
+        logging.info(f"Loading {val_examples} validation examples from 'validation' split")
+        val_tokens = get_tokens(
+            self.dataset, 
+            'validation', 
+            self.tokenizer, 
+            self.seq_len, 
+            val_examples, 
+            seed=self.random_state
+        )
+        
+        # Process training data
+        self.train_input_ids, self.train_attention_masks = self._process_tokens(train_tokens)
+        
+        # Process validation data
+        self.val_input_ids, self.val_attention_masks = self._process_tokens(val_tokens)
+        
+        # Create datasets and dataloaders
+        train_dataset = TensorDataset(self.train_input_ids, self.train_attention_masks)
+        self.train_dataloader = DataLoader(
+            train_dataset, 
+            batch_size=self.batch_size, 
+            shuffle=True,
+            drop_last=True
+        )
+        
+        val_dataset = TensorDataset(self.val_input_ids, self.val_attention_masks)
+        self.val_dataloader = DataLoader(
+            val_dataset, 
+            batch_size=self.batch_size, 
+            shuffle=False,
+            drop_last=False
+        )
+        
+        logging.info(f"Training dataset: {len(self.train_input_ids)} samples")
+        logging.info(f"Validation dataset: {len(self.val_input_ids)} samples")
+        logging.info(f"Batch size: {self.batch_size}")
+    
+    def _process_tokens(self, tokens_list):
+        """Process a list of token sequences into padded tensors."""
         input_ids = []
         attention_masks = []
         
-        for tokens in input_tokens:
+        for tokens in tokens_list:
             # Create attention mask (1 for real tokens, 0 for padding)
             attention_mask = torch.ones(len(tokens), dtype=torch.long)
             input_ids.append(tokens)
@@ -149,19 +205,10 @@ class RouterTrainer:
             padded_attention_masks.append(padded_mask)
         
         # Convert to tensors
-        self.input_ids = torch.stack(padded_input_ids)
-        self.attention_masks = torch.stack(padded_attention_masks)
+        input_ids_tensor = torch.stack(padded_input_ids)
+        attention_masks_tensor = torch.stack(padded_attention_masks)
         
-        # Create dataset and dataloader
-        dataset = TensorDataset(self.input_ids, self.attention_masks)
-        self.dataloader = DataLoader(
-            dataset, 
-            batch_size=self.batch_size, 
-            shuffle=True,
-            drop_last=True
-        )
-        
-        logging.info(f"Dataset loaded: {len(self.input_ids)} samples, batch size: {self.batch_size}")
+        return input_ids_tensor, attention_masks_tensor
     
     def setup_optimizer(self):
         """Setup optimizer for router parameters only."""
@@ -275,7 +322,7 @@ class RouterTrainer:
         total_avg_precision = 0.0
         num_batches = 0
         
-        progress_bar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}/{self.num_epochs}")
+        progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.num_epochs}")
         
         for batch_idx, (input_ids, attention_mask) in enumerate(progress_bar):
             input_ids = input_ids.to(self.device)
@@ -344,6 +391,47 @@ class RouterTrainer:
         
         return avg_loss, avg_ce_loss, avg_precision_loss, avg_precision
     
+    def validate_epoch(self):
+        """Validate for one epoch."""
+        self.model.eval()
+        total_loss = 0.0
+        total_ce_loss = 0.0
+        total_precision_loss = 0.0
+        total_avg_precision = 0.0
+        num_batches = 0
+        
+        with torch.no_grad():
+            for batch_idx, (input_ids, attention_mask) in enumerate(self.val_dataloader):
+                input_ids = input_ids.to(self.device)
+                
+                # Forward pass with router outputs collection
+                outputs = self.model.train_forward(
+                    input_ids=input_ids,
+                    return_router_outputs=True
+                )
+                
+                router_outputs = outputs.router_outputs
+                
+                # Calculate loss
+                loss, ce_loss, precision_loss, avg_precision = self.custom_loss(
+                    outputs, input_ids, router_outputs
+                )
+                
+                # Update statistics
+                total_loss += loss.item()
+                total_ce_loss += ce_loss.item()
+                total_precision_loss += precision_loss.item()
+                total_avg_precision += avg_precision.item()
+                num_batches += 1
+        
+        # Calculate averages
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        avg_ce_loss = total_ce_loss / num_batches if num_batches > 0 else 0.0
+        avg_precision_loss = total_precision_loss / num_batches if num_batches > 0 else 0.0
+        avg_precision = total_avg_precision / num_batches if num_batches > 0 else 0.0
+        
+        return avg_loss, avg_ce_loss, avg_precision_loss, avg_precision
+    
     def save_checkpoint(self, epoch, metrics):
         """Save model checkpoint."""
         checkpoint = {
@@ -361,7 +449,9 @@ class RouterTrainer:
                 'weight_ce': self.weight_ce,
                 'weight_precision': self.weight_precision,
                 'precisions': self.model.precisions,
-                'random_state': self.random_state
+                'random_state': self.random_state,
+                'validation_split': self.validation_split,
+                'validation_examples': self.validation_examples
             }
         }
         
@@ -375,6 +465,35 @@ class RouterTrainer:
         with open(history_path, 'w') as f:
             json.dump(self.train_history, f, indent=2)
         logging.info(f"Training history saved: {history_path}")
+        
+        # Also save a summary
+        summary_path = os.path.join(self.save_dir, 'training_summary.txt')
+        with open(summary_path, 'w') as f:
+            f.write("Router Training Summary\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Configuration:\n")
+            f.write(f"  - Model: {self.model_path}\n")
+            f.write(f"  - Dataset: {self.dataset}\n")
+            f.write(f"  - Sequence length: {self.seq_len}\n")
+            f.write(f"  - Training examples: {len(self.train_input_ids)}\n")
+            f.write(f"  - Validation examples: {len(self.val_input_ids)}\n")
+            f.write(f"  - Batch size: {self.batch_size}\n")
+            f.write(f"  - Learning rate: {self.learning_rate}\n")
+            f.write(f"  - Epochs: {self.num_epochs}\n")
+            f.write(f"  - Validation split: {self.validation_split}\n")
+            f.write(f"  - CE weight: {self.weight_ce}\n")
+            f.write(f"  - Precision weight: {self.weight_precision}\n")
+            f.write(f"  - Available precisions: {self.model.precisions}\n\n")
+            
+            if len(self.train_history['epoch']) > 0:
+                f.write("Final Results:\n")
+                f.write(f"  - Final training loss: {self.train_history['train_total_loss'][-1]:.4f}\n")
+                f.write(f"  - Final validation loss: {self.train_history['val_total_loss'][-1]:.4f}\n")
+                f.write(f"  - Best validation loss: {min(self.train_history['val_total_loss']):.4f}\n")
+                f.write(f"  - Final training avg precision: {self.train_history['train_avg_precision'][-1]:.2f}\n")
+                f.write(f"  - Final validation avg precision: {self.train_history['val_avg_precision'][-1]:.2f}\n")
+        
+        logging.info(f"Training summary saved: {summary_path}")
     
     def train(self):
         """Main training loop."""
@@ -388,6 +507,9 @@ class RouterTrainer:
         logging.info(f"  - Number of epochs: {self.num_epochs}")
         logging.info(f"  - CE weight: {self.weight_ce}")
         logging.info(f"  - Precision weight: {self.weight_precision}")
+        logging.info(f"  - Validation split: {self.validation_split}")
+        if self.validation_examples is not None:
+            logging.info(f"  - Validation examples: {self.validation_examples}")
         logging.info(f"  - Available precisions: {self.model.precisions}")
         
         best_loss = float('inf')
@@ -396,34 +518,51 @@ class RouterTrainer:
             logging.info(f"\nEpoch {epoch+1}/{self.num_epochs}")
             
             # Train for one epoch
-            avg_loss, avg_ce_loss, avg_precision_loss, avg_precision = self.train_epoch(epoch)
+            train_avg_loss, train_avg_ce_loss, train_avg_precision_loss, train_avg_precision = self.train_epoch(epoch)
+            
+            # Validate for one epoch
+            val_avg_loss, val_avg_ce_loss, val_avg_precision_loss, val_avg_precision = self.validate_epoch()
             
             # Log metrics
             logging.info(f"Epoch {epoch+1} Results:")
-            logging.info(f"  - Total Loss: {avg_loss:.4f}")
-            logging.info(f"  - CE Loss: {avg_ce_loss:.4f}")
-            logging.info(f"  - Precision Loss: {avg_precision_loss:.4f}")
-            logging.info(f"  - Average Precision: {avg_precision:.2f}")
+            logging.info(f"  Training:")
+            logging.info(f"    - Total Loss: {train_avg_loss:.4f}")
+            logging.info(f"    - CE Loss: {train_avg_ce_loss:.4f}")
+            logging.info(f"    - Precision Loss: {train_avg_precision_loss:.4f}")
+            logging.info(f"    - Average Precision: {train_avg_precision:.2f}")
+            logging.info(f"  Validation:")
+            logging.info(f"    - Total Loss: {val_avg_loss:.4f}")
+            logging.info(f"    - CE Loss: {val_avg_ce_loss:.4f}")
+            logging.info(f"    - Precision Loss: {val_avg_precision_loss:.4f}")
+            logging.info(f"    - Average Precision: {val_avg_precision:.2f}")
             
             # Save to history
             self.train_history['epoch'].append(epoch + 1)
-            self.train_history['total_loss'].append(avg_loss)
-            self.train_history['ce_loss'].append(avg_ce_loss)
-            self.train_history['precision_loss'].append(avg_precision_loss)
-            self.train_history['avg_precision'].append(avg_precision)
+            self.train_history['train_total_loss'].append(train_avg_loss)
+            self.train_history['train_ce_loss'].append(train_avg_ce_loss)
+            self.train_history['train_precision_loss'].append(train_avg_precision_loss)
+            self.train_history['train_avg_precision'].append(train_avg_precision)
+            self.train_history['val_total_loss'].append(val_avg_loss)
+            self.train_history['val_ce_loss'].append(val_avg_ce_loss)
+            self.train_history['val_precision_loss'].append(val_avg_precision_loss)
+            self.train_history['val_avg_precision'].append(val_avg_precision)
             
             # Save checkpoint
             metrics = {
-                'total_loss': avg_loss,
-                'ce_loss': avg_ce_loss,
-                'precision_loss': avg_precision_loss,
-                'avg_precision': avg_precision
+                'train_total_loss': train_avg_loss,
+                'train_ce_loss': train_avg_ce_loss,
+                'train_precision_loss': train_avg_precision_loss,
+                'train_avg_precision': train_avg_precision,
+                'val_total_loss': val_avg_loss,
+                'val_ce_loss': val_avg_ce_loss,
+                'val_precision_loss': val_avg_precision_loss,
+                'val_avg_precision': val_avg_precision
             }
             self.save_checkpoint(epoch, metrics)
             
-            # Save best model
-            if avg_loss < best_loss:
-                best_loss = avg_loss
+            # Save best model based on validation loss
+            if val_avg_loss < best_loss:
+                best_loss = val_avg_loss
                 best_checkpoint_path = os.path.join(self.save_dir, 'best_router_checkpoint.pt')
                 torch.save({
                     'epoch': epoch,
@@ -440,7 +579,9 @@ class RouterTrainer:
                         'weight_ce': self.weight_ce,
                         'weight_precision': self.weight_precision,
                         'precisions': self.model.precisions,
-                        'random_state': self.random_state
+                        'random_state': self.random_state,
+                        'validation_split': self.validation_split,
+                        'validation_examples': self.validation_examples
                     }
                 }, best_checkpoint_path)
                 logging.info(f"New best model saved: {best_checkpoint_path}")
@@ -449,8 +590,9 @@ class RouterTrainer:
         self.save_training_history()
         
         logging.info("\nTraining completed!")
-        logging.info(f"Best loss: {best_loss:.4f}")
+        logging.info(f"Best validation loss: {best_loss:.4f}")
         logging.info(f"Checkpoints saved in: {self.save_dir}")
+        logging.info(f"Training history saved as: {os.path.join(self.save_dir, 'training_history.json')}")
 
 
 def main():
@@ -462,13 +604,15 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs")
-    parser.add_argument("--weight_ce", type=float, default=0.1, help="Weight for cross entropy loss")
-    parser.add_argument("--weight_precision", type=float, default=0.9, help="Weight for precision loss")
+    parser.add_argument("--weight_ce", type=float, default=0.5, help="Weight for cross entropy loss")
+    parser.add_argument("--weight_precision", type=float, default=0.5, help="Weight for precision loss")
     parser.add_argument("--save_dir", type=str, default="router_checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/cpu)")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed")
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument("--precisions", type=int, nargs="+", default=None, help="Precisions to use")
+    parser.add_argument("--validation_split", type=float, default=0.2, help="Fraction of data to use for validation")
+    parser.add_argument("--validation_examples", type=int, default=None, help="Number of validation examples (overrides validation_split)")
     
     args = parser.parse_args()
     
@@ -495,7 +639,9 @@ def main():
         device=args.device,
         random_state=args.random_state,
         trust_remote_code=args.trust_remote_code,
-        precisions=args.precisions
+        precisions=args.precisions,
+        validation_split=args.validation_split,
+        validation_examples=args.validation_examples
     )
     
     # Start training
