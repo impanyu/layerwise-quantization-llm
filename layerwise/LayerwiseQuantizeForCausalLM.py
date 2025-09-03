@@ -85,8 +85,12 @@ def sparsemax(input, dim=-1):
 
 
 class Router(nn.Module):
-    """Router network that outputs a one-hot vector for precision selection."""
-    def __init__(self, input_dim, num_precisions, hidden_dim=128, dtype=None):
+    """Router network that outputs a one-hot vector for precision selection.
+    
+    Uses softmax activation by default. Sparsemax implementation is available
+    in the sparsemax() function above if sparse outputs are needed in the future.
+    """
+    def __init__(self, input_dim, num_precisions, hidden_dim=128, dtype=None, use_sparsemax=False):
         super().__init__()
         # Always use float32 for router parameters to avoid numerical instability
         # Ignore the dtype parameter - router always uses float32 internally
@@ -94,6 +98,7 @@ class Router(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, hidden_dim, dtype=torch.float32)
         self.fc3 = nn.Linear(hidden_dim, num_precisions, dtype=torch.float32)
         self.dropout = nn.Dropout(0.1)
+        self.use_sparsemax = use_sparsemax
         
         # Initialize weights to prevent extreme values
         with torch.no_grad():
@@ -137,12 +142,17 @@ class Router(nn.Module):
         x = self.dropout(x)
         x = self.fc3(x)
         
-        # Check for extreme values before sparsemax
+        # Check for extreme values before activation
         if torch.isinf(x).any() or x.abs().max() > 50:
-            print(f"WARNING: Extreme values before sparsemax: min={x.min()}, max={x.max()}")
+            print(f"WARNING: Extreme values before activation: min={x.min()}, max={x.max()}")
         
-        # Sparsemax in float32 for numerical stability and sparsity
-        x = sparsemax(x, dim=-1)
+        # Apply activation function based on configuration
+        if self.use_sparsemax:
+            # Sparsemax for sparse precision selection
+            x = sparsemax(x, dim=-1)
+        else:
+            # Softmax for smooth precision distribution (default)
+            x = F.softmax(x, dim=-1)
         
         # Final safety check
         if torch.isnan(x).any():
@@ -166,10 +176,12 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
             torch_dtype=torch.float16,
             fuse_layers=False,
             trust_remote_code=True,
+            use_sparsemax=False,
     ):
         super().__init__()
 
         self.config = config
+        self.use_sparsemax = use_sparsemax
 
         self.supported_bits = list(range(self.config.anyprec['seed_precision'],
                                          self.config.anyprec['parent_precision'] + 1))
@@ -231,11 +243,11 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         # Router for embedding layer (before first transformer layer)
         embedding_dim = self.model.config.hidden_size
         model_dtype = next(self.model.parameters()).dtype
-        self.embedding_router = Router(embedding_dim, len(self.precisions))
+        self.embedding_router = Router(embedding_dim, len(self.precisions), use_sparsemax=self.use_sparsemax)
         
         # Routers for each transformer layer
         for _ in layers:
-            self.routers.append(Router(embedding_dim, len(self.precisions)))
+            self.routers.append(Router(embedding_dim, len(self.precisions), use_sparsemax=self.use_sparsemax))
 
     def _freeze_original_parameters(self):
         """Freeze all parameters from the original language model."""
@@ -435,7 +447,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
             quant_model_path,
             trust_remote_code=True,
             fuse_layers=False,
-            precisions=None
+            precisions=None,
+            use_sparsemax=False
     ):
         config = cls._load_config(quant_model_path, trust_remote_code)
 
@@ -445,6 +458,7 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
             config=config,
             fuse_layers=fuse_layers,
             trust_remote_code=trust_remote_code,
+            use_sparsemax=use_sparsemax,
         )
 
         return ap_model
