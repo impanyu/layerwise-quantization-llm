@@ -335,8 +335,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                 
                 # Forward through this specific layer
                 # Use no_grad for transformer layers to save memory, but allow gradients for router mixing
-                #with torch.no_grad():
-                layer_output_precision = layer(current_input)
+                with torch.no_grad():
+                    layer_output_precision = layer(current_input)
                 
       
                 # Mix based on router weights
