@@ -337,9 +337,40 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                 # Option 1: Gradient checkpointing (recommended for most cases)
                 from torch.utils.checkpoint import checkpoint
                 
-                def layer_forward_fn(x):
-                    """Wrapper function for gradient checkpointing."""
-                    return layer(x)
+                # Create a closure that properly captures the current layer and precision
+                def create_layer_forward_fn(layer_ref, precision_val, ap_linears_ref):
+                    def layer_forward_fn(x):
+                        """Wrapper function for gradient checkpointing with proper closure."""
+                        # Debug: Check input for NaN before layer forward
+                        if torch.isnan(x).any():
+                            print(f"WARNING: NaN in input to layer during checkpointing, precision {precision_val}")
+                        
+                        # CRITICAL: Ensure precision is set on ALL AnyPrecisionLinear modules
+                        # during recomputation to maintain consistency
+                        for ap_linear in ap_linears_ref:
+                            ap_linear.set_precision(precision_val)
+                        
+                        # Alternative approach: Pass precision explicitly to layer if supported
+                        # This ensures deterministic precision usage during recomputation
+                        try:
+                            # Check if the layer has modules that can accept precision parameter
+                            output = layer_ref(x, precision=precision_val)
+                        except TypeError:
+                            # Fallback to regular forward if precision parameter not supported
+                            output = layer_ref(x)
+                        
+                        # Debug: Check output for NaN after layer forward
+                        if torch.isnan(output).any() if isinstance(output, torch.Tensor) else torch.isnan(output[0]).any():
+                            print(f"WARNING: NaN in layer output during checkpointing, precision {precision_val}")
+                        
+                        return output
+                    return layer_forward_fn
+                
+                layer_forward_fn = create_layer_forward_fn(layer, precision, self.ap_linears)
+                
+                # Debug: Check current_input before checkpointing
+                if torch.isnan(current_input).any():
+                    print(f"ERROR: NaN in current_input before checkpointing, precision {precision}")
                 
                 layer_output_precision = checkpoint(
                     layer_forward_fn, 

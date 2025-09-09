@@ -356,14 +356,16 @@ class RouterTrainer:
             
             # Check for NaN in gradients before optimizer step
             has_nan_grad = False
-            for param in self.model.get_trainable_parameters():
-                if param.grad is not None and torch.isnan(param.grad).any():
-                    print("ERROR: NaN detected in gradients!")
+            nan_param_names = []
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and param.grad is not None and torch.isnan(param.grad).any():
                     has_nan_grad = True
-                    break
+                    nan_param_names.append(name)
             
             if has_nan_grad:
-                print("Skipping optimizer step due to NaN gradients")
+                print(f"ERROR: NaN detected in gradients for parameters: {nan_param_names[:5]}...")  # Show first 5
+                print(f"Loss values: total={loss.item():.6f}, ce={ce_loss.item():.6f}, prec={precision_loss.item():.6f}")
+                print(f"Batch {batch_idx}: Skipping optimizer step due to NaN gradients")
                 continue
             
             self.optimizer.step()
@@ -383,7 +385,12 @@ class RouterTrainer:
                 'AvgPrec': f'{avg_precision.item():.2f}'
             })
         
-        # Calculate averages
+        # Calculate averages with safety check
+        if num_batches == 0:
+            logging.error("No valid training batches processed! All gradients were NaN.")
+            logging.error("This indicates a serious numerical instability issue.")
+            return float('inf'), float('inf'), float('inf'), 0.0
+        
         avg_loss = total_loss / num_batches
         avg_ce_loss = total_ce_loss / num_batches
         avg_precision_loss = total_precision_loss / num_batches
