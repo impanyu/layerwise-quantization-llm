@@ -334,9 +334,41 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                 self.set_precision(precision)
                 
                 # Forward through this specific layer
-                # Use no_grad for transformer layers to save memory, but allow gradients for router mixing
-                with torch.no_grad():
-                    layer_output_precision = layer(current_input)
+                # Option 1: Gradient checkpointing (recommended for most cases)
+                from torch.utils.checkpoint import checkpoint
+                
+                def layer_forward_fn(x):
+                    """Wrapper function for gradient checkpointing."""
+                    return layer(x)
+                
+                layer_output_precision = checkpoint(
+                    layer_forward_fn, 
+                    current_input, 
+                    use_reentrant=False  # Use newer, more memory-efficient checkpointing
+                )
+                
+                # Option 2: Custom autograd function (maximum memory efficiency)
+                # Uncomment below and comment above to use custom autograd:
+                # 
+                # class LayerForwardInputGradOnly(torch.autograd.Function):
+                #     @staticmethod
+                #     def forward(ctx, input_tensor, layer_module):
+                #         ctx.layer_module = layer_module
+                #         ctx.save_for_backward(input_tensor)
+                #         with torch.no_grad():
+                #             return layer_module(input_tensor)
+                #     
+                #     @staticmethod
+                #     def backward(ctx, grad_output):
+                #         input_tensor, = ctx.saved_tensors
+                #         layer_module = ctx.layer_module
+                #         input_for_grad = input_tensor.detach().requires_grad_(True)
+                #         with torch.enable_grad():
+                #             output = layer_module(input_for_grad)
+                #         grad_input = torch.autograd.grad(output, input_for_grad, grad_output)[0]
+                #         return grad_input, None
+                # 
+                # layer_output_precision = LayerForwardInputGradOnly.apply(current_input, layer)
                 
       
                 # Mix based on router weights
