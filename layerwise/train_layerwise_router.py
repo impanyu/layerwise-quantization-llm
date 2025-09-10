@@ -10,6 +10,8 @@ import numpy as np
 from transformers import AutoTokenizer
 import json
 from datetime import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 try:
     # Relative imports (when run as module)
@@ -46,7 +48,8 @@ class RouterTrainer:
         trust_remote_code=True,
         precisions=None,
         validation_split=0.2,
-        validation_examples=None
+        validation_examples=None,
+        generate_plots=True
     ):
         self.model_path = model_path
         self.dataset = dataset
@@ -64,6 +67,7 @@ class RouterTrainer:
         self.precisions = precisions
         self.validation_split = validation_split
         self.validation_examples = validation_examples
+        self.generate_plots = generate_plots
         
         # Validate weights
         assert abs(self.weight_ce + self.weight_precision - 1.0) < 1e-6, \
@@ -592,6 +596,131 @@ class RouterTrainer:
         
         logging.info(f"Training summary saved: {summary_path}")
     
+    def plot_training_history(self):
+        """Plot comprehensive training and validation history."""
+        if len(self.train_history['epoch']) == 0:
+            logging.warning("No training history to plot")
+            return
+        
+        # Set up the plotting style
+        plt.style.use('default')
+        sns.set_palette("husl")
+        
+        # Create a large figure with subplots
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle('Router Training History', fontsize=16, fontweight='bold')
+        
+        epochs = self.train_history['epoch']
+        
+        # Plot 1: Total Loss
+        ax1 = axes[0, 0]
+        ax1.plot(epochs, self.train_history['train_total_loss'], 'o-', label='Training', linewidth=2, markersize=4)
+        ax1.plot(epochs, self.train_history['val_total_loss'], 's-', label='Validation', linewidth=2, markersize=4)
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Total Loss')
+        ax1.set_title('Total Loss')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Cross Entropy Loss
+        ax2 = axes[0, 1]
+        ax2.plot(epochs, self.train_history['train_ce_loss'], 'o-', label='Training', linewidth=2, markersize=4)
+        ax2.plot(epochs, self.train_history['val_ce_loss'], 's-', label='Validation', linewidth=2, markersize=4)
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Cross Entropy Loss')
+        ax2.set_title('Cross Entropy Loss')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # Plot 3: Precision Loss
+        ax3 = axes[1, 0]
+        ax3.plot(epochs, self.train_history['train_precision_loss'], 'o-', label='Training', linewidth=2, markersize=4)
+        ax3.plot(epochs, self.train_history['val_precision_loss'], 's-', label='Validation', linewidth=2, markersize=4)
+        ax3.set_xlabel('Epoch')
+        ax3.set_ylabel('Precision Loss')
+        ax3.set_title('Precision Loss')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # Plot 4: Average Precision
+        ax4 = axes[1, 1]
+        ax4.plot(epochs, self.train_history['train_avg_precision'], 'o-', label='Training', linewidth=2, markersize=4)
+        ax4.plot(epochs, self.train_history['val_avg_precision'], 's-', label='Validation', linewidth=2, markersize=4)
+        ax4.set_xlabel('Epoch')
+        ax4.set_ylabel('Average Precision (bits)')
+        ax4.set_title('Average Precision')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        # Add horizontal line showing available precision range
+        min_prec = min(self.model.precisions)
+        max_prec = max(self.model.precisions)
+        ax4.axhline(y=min_prec, color='gray', linestyle='--', alpha=0.5, label=f'Min precision ({min_prec})')
+        ax4.axhline(y=max_prec, color='gray', linestyle='--', alpha=0.5, label=f'Max precision ({max_prec})')
+        ax4.legend()
+        
+        plt.tight_layout()
+        
+        # Save the plot
+        plot_path = os.path.join(self.save_dir, 'training_history_plot.png')
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        logging.info(f"Training history plot saved: {plot_path}")
+        
+        # Also save as PDF for publications
+        plot_pdf_path = os.path.join(self.save_dir, 'training_history_plot.pdf')
+        plt.savefig(plot_pdf_path, bbox_inches='tight')
+        logging.info(f"Training history plot (PDF) saved: {plot_pdf_path}")
+        
+        plt.close()
+        
+        # Create a separate plot for loss comparison
+        #self._plot_loss_comparison()
+    
+    def _plot_loss_comparison(self):
+        """Create a focused plot comparing training vs validation loss."""
+        if len(self.train_history['epoch']) == 0:
+            return
+        
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        
+        epochs = self.train_history['epoch']
+        
+        # Plot total loss with confidence interval style
+        ax.plot(epochs, self.train_history['train_total_loss'], 'o-', 
+                label='Training Total Loss', linewidth=2.5, markersize=5, color='#2E86AB')
+        ax.plot(epochs, self.train_history['val_total_loss'], 's-', 
+                label='Validation Total Loss', linewidth=2.5, markersize=5, color='#A23B72')
+        
+        # Add markers for best validation loss
+        best_val_idx = np.argmin(self.train_history['val_total_loss'])
+        best_val_loss = self.train_history['val_total_loss'][best_val_idx]
+        best_epoch = epochs[best_val_idx]
+        
+        ax.scatter([best_epoch], [best_val_loss], color='red', s=100, 
+                  marker='*', zorder=5, label=f'Best Val Loss (Epoch {best_epoch})')
+        
+        ax.set_xlabel('Epoch', fontsize=12)
+        ax.set_ylabel('Loss', fontsize=12)
+        ax.set_title('Training vs Validation Loss', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        # Add text annotation for best validation loss
+        ax.annotate(f'Best: {best_val_loss:.4f}', 
+                   xy=(best_epoch, best_val_loss), 
+                   xytext=(best_epoch + 0.5, best_val_loss + 0.1),
+                   arrowprops=dict(arrowstyle='->', color='red', alpha=0.7),
+                   fontsize=10, color='red')
+        
+        plt.tight_layout()
+        
+        # Save the focused loss plot
+        loss_plot_path = os.path.join(self.save_dir, 'loss_comparison_plot.png')
+        plt.savefig(loss_plot_path, dpi=300, bbox_inches='tight')
+        logging.info(f"Loss comparison plot saved: {loss_plot_path}")
+        
+        plt.close()
+    
     def train(self):
         """Main training loop."""
         logging.info("Starting router training...")
@@ -686,11 +815,23 @@ class RouterTrainer:
         # Save final training history
         self.save_training_history()
         
+        # Plot training history
+        if hasattr(self, 'generate_plots') and self.generate_plots:
+            try:
+                logging.info("Generating training history plots...")
+                self.plot_training_history()
+            except Exception as e:
+                logging.warning(f"Failed to generate plots: {e}")
+                logging.warning("Training completed successfully, but plots could not be generated")
+        else:
+            logging.info("Plot generation skipped (--no_plots flag used)")
+        
         logging.info("\nTraining completed!")
         logging.info(f"Best validation loss: {best_loss:.4f}")
         logging.info(f"Checkpoints saved in: {self.save_dir}")
         logging.info(f"Training history saved as: {os.path.join(self.save_dir, 'training_history.json')}")
         logging.info(f"Router outputs saved as: {os.path.join(self.save_dir, 'validation_router_outputs.jsonl')}")
+        logging.info(f"Training plots saved in: {self.save_dir}")
 
 
 def main():
@@ -711,6 +852,7 @@ def main():
     parser.add_argument("--precisions", type=int, nargs="+", default=None, help="Precisions to use")
     parser.add_argument("--validation_split", type=float, default=0.2, help="Fraction of data to use for validation")
     parser.add_argument("--validation_examples", type=int, default=None, help="Number of validation examples (overrides validation_split)")
+    parser.add_argument("--no_plots", action="store_true", help="Skip generating training plots")
     
     args = parser.parse_args()
     
@@ -739,7 +881,8 @@ def main():
         trust_remote_code=args.trust_remote_code,
         precisions=args.precisions,
         validation_split=args.validation_split,
-        validation_examples=args.validation_examples
+        validation_examples=args.validation_examples,
+        generate_plots=not args.no_plots
     )
     
     # Start training
