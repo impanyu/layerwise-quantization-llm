@@ -10,8 +10,14 @@ import numpy as np
 from transformers import AutoTokenizer
 import json
 from datetime import datetime
-import matplotlib.pyplot as plt
-import seaborn as sns
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    PLOTTING_AVAILABLE = True
+except ImportError:
+    PLOTTING_AVAILABLE = False
+    plt = None
+    sns = None
 
 try:
     # Relative imports (when run as module)
@@ -598,6 +604,10 @@ class RouterTrainer:
     
     def plot_training_history(self):
         """Plot comprehensive training and validation history."""
+        if not PLOTTING_AVAILABLE:
+            logging.warning("Plotting libraries not available. Install matplotlib and seaborn to generate plots.")
+            return
+            
         if len(self.train_history['epoch']) == 0:
             logging.warning("No training history to plot")
             return
@@ -678,6 +688,9 @@ class RouterTrainer:
     
     def _plot_loss_comparison(self):
         """Create a focused plot comparing training vs validation loss."""
+        if not PLOTTING_AVAILABLE:
+            return
+            
         if len(self.train_history['epoch']) == 0:
             return
         
@@ -817,12 +830,16 @@ class RouterTrainer:
         
         # Plot training history
         if hasattr(self, 'generate_plots') and self.generate_plots:
-            try:
-                logging.info("Generating training history plots...")
-                self.plot_training_history()
-            except Exception as e:
-                logging.warning(f"Failed to generate plots: {e}")
-                logging.warning("Training completed successfully, but plots could not be generated")
+            if not PLOTTING_AVAILABLE:
+                logging.warning("Plotting libraries not available. Install matplotlib and seaborn to generate plots.")
+                logging.info("Training completed successfully, but plots could not be generated")
+            else:
+                try:
+                    logging.info("Generating training history plots...")
+                    self.plot_training_history()
+                except Exception as e:
+                    logging.warning(f"Failed to generate plots: {e}")
+                    logging.warning("Training completed successfully, but plots could not be generated")
         else:
             logging.info("Plot generation skipped (--no_plots flag used)")
         

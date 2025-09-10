@@ -22,8 +22,14 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import numpy as np
 import json
-import matplotlib.pyplot as plt
-import seaborn as sns
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    PLOTTING_AVAILABLE = True
+except ImportError:
+    PLOTTING_AVAILABLE = False
+    plt = None
+    sns = None
 from transformers import AutoTokenizer
 
 try:
@@ -368,6 +374,10 @@ class RouterEvaluator:
     
     def plot_comparison(self):
         """Create comparison plots."""
+        if not PLOTTING_AVAILABLE:
+            logging.warning("Plotting libraries not available. Install matplotlib and seaborn to generate plots.")
+            return
+            
         if not self.results:
             logging.warning("No results to plot")
             return
@@ -433,6 +443,9 @@ class RouterEvaluator:
     
     def _plot_loss_focus(self):
         """Create a focused plot comparing just the losses."""
+        if not PLOTTING_AVAILABLE:
+            return
+            
         fig, ax = plt.subplots(1, 1, figsize=(12, 8))
         
         model_names = list(self.results.keys())
@@ -540,11 +553,14 @@ def main():
     
     # Generate plots
     if not args.no_plots:
-        try:
-            logging.info("Generating comparison plots...")
-            evaluator.plot_comparison()
-        except Exception as e:
-            logging.warning(f"Failed to generate plots: {e}")
+        if not PLOTTING_AVAILABLE:
+            logging.warning("Plotting libraries not available. Install matplotlib and seaborn to generate plots.")
+        else:
+            try:
+                logging.info("Generating comparison plots...")
+                evaluator.plot_comparison()
+            except Exception as e:
+                logging.warning(f"Failed to generate plots: {e}")
     
     # Print summary
     evaluator.print_summary()

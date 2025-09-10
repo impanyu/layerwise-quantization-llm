@@ -7,9 +7,16 @@ Useful for analyzing training results after the fact.
 import argparse
 import json
 import os
-import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
+
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    PLOTTING_AVAILABLE = True
+except ImportError:
+    print("Error: matplotlib and seaborn are required for plotting.")
+    print("Install them with: pip install matplotlib seaborn")
+    exit(1)
 
 
 def load_training_history(history_path):

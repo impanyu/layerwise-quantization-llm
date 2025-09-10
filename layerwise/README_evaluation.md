@@ -68,10 +68,10 @@ python evaluate_router_vs_quantized.py \
 ### Command Line Arguments
 
 ```bash
-python evaluate_router_vs_quantized.py <checkpoint_dir> [options]
+python evaluate_router_vs_quantized.py [checkpoint_dir] [options]
 
-Required:
-  checkpoint_dir        Directory containing router checkpoints
+Optional Positional:
+  checkpoint_dir        Directory containing router checkpoints (default: router_checkpoints)
 
 Options:
   --dataset DATASET     Dataset to use (default: c4)
