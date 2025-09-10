@@ -870,7 +870,7 @@ def main():
     parser.add_argument("--weight_ce", type=float, default=0.5, help="Weight for cross entropy loss")
     parser.add_argument("--weight_precision", type=float, default=0.5, help="Weight for precision loss")
     parser.add_argument("--save_dir", type=str, default="router_checkpoints", help="Directory to save checkpoints")
-    parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/cpu)")
+    parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/cpu). Use 'cuda' to force GPU usage.")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed")
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument("--precisions", type=int, nargs="+", default=None, help="Precisions to use")
@@ -896,6 +896,17 @@ def main():
         else:
             args.device = 'cpu'
             logging.info("CUDA is not available, using CPU")
+    elif args.device == 'cuda':
+        # User explicitly requested CUDA, try to force it
+        logging.info("CUDA explicitly requested, attempting to force CUDA initialization...")
+        try:
+            torch.cuda.init()
+            torch.cuda.current_device()
+            logging.info("Successfully forced CUDA initialization")
+        except Exception as e:
+            logging.error(f"Failed to force CUDA initialization: {e}")
+            logging.error("Consider fixing your CUDA environment or using --device cpu")
+            raise RuntimeError("CUDA requested but not functional")
     
     # Validate weights
     if abs(args.weight_ce + args.weight_precision - 1.0) > 1e-6:
