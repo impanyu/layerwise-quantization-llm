@@ -11,6 +11,9 @@ from transformers import AutoTokenizer
 import json
 from datetime import datetime
 try:
+    import matplotlib
+    # Set matplotlib backend before importing pyplot to avoid GUI issues
+    matplotlib.use('Agg')  # Use non-interactive backend
     import matplotlib.pyplot as plt
     import seaborn as sns
     PLOTTING_AVAILABLE = True
@@ -103,6 +106,10 @@ class RouterTrainer:
     def setup_model(self):
         """Load the layerwise quantized model."""
         logging.info(f"Loading model from {self.model_path}")
+        
+        # Load model with proper device handling
+        if self.device == 'cpu':
+            logging.warning("Loading model on CPU. AnyPrecision kernels require CUDA, falling back to standard operations.")
         
         self.model = LayerwiseQuantizeForCausalLM.from_quantized(
             quant_model_path=self.model_path,
@@ -873,9 +880,22 @@ def main():
     
     args = parser.parse_args()
     
-    # Set device
+    # Set device with better CUDA validation
     if args.device is None:
-        args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if torch.cuda.is_available():
+            try:
+                # Test CUDA functionality
+                torch.cuda.init()
+                torch.cuda.current_device()
+                args.device = 'cuda'
+                logging.info("CUDA is available and functional")
+            except Exception as e:
+                logging.warning(f"CUDA is available but not functional: {e}")
+                logging.warning("Falling back to CPU")
+                args.device = 'cpu'
+        else:
+            args.device = 'cpu'
+            logging.info("CUDA is not available, using CPU")
     
     # Validate weights
     if abs(args.weight_ce + args.weight_precision - 1.0) > 1e-6:

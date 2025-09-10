@@ -23,6 +23,9 @@ from tqdm import tqdm
 import numpy as np
 import json
 try:
+    import matplotlib
+    # Set matplotlib backend before importing pyplot to avoid GUI issues
+    matplotlib.use('Agg')  # Use non-interactive backend
     import matplotlib.pyplot as plt
     import seaborn as sns
     PLOTTING_AVAILABLE = True
