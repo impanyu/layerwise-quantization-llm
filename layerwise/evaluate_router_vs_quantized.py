@@ -255,7 +255,7 @@ class RouterEvaluator:
                     return_router_outputs=True
                 )
                 
-                router_outputs = outputs['router_outputs']
+                router_outputs = outputs.router_outputs
                 
                 # Calculate loss (router outputs are one-hot vectors from inference)
                 loss, ce_loss, precision_loss, avg_precision = self.custom_loss(
