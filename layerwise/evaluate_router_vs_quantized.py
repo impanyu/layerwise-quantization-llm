@@ -39,6 +39,7 @@ try:
     # Relative imports (when run as module)
     from .LayerwiseQuantizeForCausalLM import LayerwiseQuantizeForCausalLM
     from ..any_precision.quantization.datautils import get_tokens
+    from ..any_precision import AnyPrecisionForCausalLM
 except ImportError:
     # Absolute imports (when run as script)
     import sys
@@ -46,6 +47,7 @@ except ImportError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from layerwise.LayerwiseQuantizeForCausalLM import LayerwiseQuantizeForCausalLM
     from any_precision.quantization.datautils import get_tokens
+    from any_precision import AnyPrecisionForCausalLM
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s | %(levelname)s] %(message)s', datefmt='%H:%M:%S')
@@ -286,13 +288,20 @@ class RouterEvaluator:
                     f"Prec: {avg_precision_loss:.4f}, AvgPrec: {avg_avg_precision:.2f}")
     
     def evaluate_fixed_precision_model(self, precision):
-        """Evaluate the model with a fixed precision."""
+        """Evaluate the model with a fixed precision using original AnyPrecisionForCausalLM."""
         logging.info(f"Evaluating fixed precision model ({precision}-bit)...")
         
-        self.model.eval()
+        # Load original AnyPrecisionForCausalLM model for clean fixed precision evaluation
+        fixed_model = AnyPrecisionForCausalLM.from_quantized(
+            quant_model_path=self.model_path,
+            trust_remote_code=self.config.get('trust_remote_code', True),
+            precisions=[precision]  # Only use the specific precision
+        )
+        fixed_model.to(self.device)
+        fixed_model.eval()
         
-        # Set all layers to the specified precision
-        self.model.set_precision(precision)
+        # Set the model to use the specific precision
+        fixed_model.set_precision(precision)
         
         total_loss = 0.0
         total_ce_loss = 0.0
@@ -304,17 +313,27 @@ class RouterEvaluator:
             for input_ids, attention_mask in tqdm(self.dataloader, desc=f"{precision}-bit evaluation"):
                 input_ids = input_ids.to(self.device)
                 
-                # Use training forward to get router outputs (but they'll be uniform for fixed precision)
-                outputs = self.model.train_forward(
-                    input_ids=input_ids,
-                    return_router_outputs=True
-                )
+                # Use the original model's forward pass (no router mixing)
+                outputs = fixed_model(input_ids=input_ids)
                 
-                router_outputs = outputs.router_outputs
+                # Create fake router outputs for consistent loss calculation
+                # All layers use the same fixed precision (one-hot representation)
+                batch_size = input_ids.shape[0]
                 
-                # Calculate loss
+                # Get the actual number of layers from the router model
+                num_layers = len(self.model.routers)
+                
+                # Create one-hot vectors representing the fixed precision
+                precision_idx = self.precisions.index(precision)
+                fake_router_outputs = []
+                for _ in range(num_layers):
+                    one_hot = torch.zeros(batch_size, len(self.precisions), device=self.device)
+                    one_hot[:, precision_idx] = 1.0
+                    fake_router_outputs.append(one_hot)
+                
+                # Calculate loss using the same loss function for consistency
                 loss, ce_loss, precision_loss, avg_precision = self.custom_loss(
-                    outputs, input_ids, router_outputs
+                    outputs, input_ids, fake_router_outputs
                 )
                 
                 total_loss += loss.item()
@@ -322,6 +341,10 @@ class RouterEvaluator:
                 total_precision_loss += precision_loss.item()
                 total_avg_precision += avg_precision.item()
                 num_batches += 1
+        
+        # Clean up the temporary model
+        del fixed_model
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
         # Calculate averages
         avg_loss = total_loss / num_batches
