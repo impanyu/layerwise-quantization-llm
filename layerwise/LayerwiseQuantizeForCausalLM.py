@@ -296,177 +296,140 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         
         print("✓ Unfrozen original LM parameters")
 
-    def train_forward(self, input_ids, return_router_outputs=False, **kwargs):
-        """Forward pass during training with mixed precision based on router outputs."""
-        batch_size, seq_len = input_ids.shape
-        
-        # Get embedding output
-        embeddings = self.model.get_input_embeddings()(input_ids)
-        current_input = embeddings
-        # Check for NaN in embeddings
-        if torch.isnan(current_input).any():
-            print(f"ERROR: NaN detected in initial embeddings!")
-            # Reset to a safe state
-            current_input = torch.zeros_like(current_input)
-        
-        # Process through each transformer layer with its own router
-        layers = self.get_model_layers()
-        router_outputs = []
-        
-        for layer_idx, layer in enumerate(layers):
-            # Check for NaN in current input
-            if torch.isnan(current_input).any():
-                print(f"ERROR: NaN detected in layer {layer_idx} input, stopping training")
-                break
-                
-            # For fixed-length sequences, all tokens are real
-            num_real_tokens = torch.full((batch_size,), seq_len, dtype=torch.long, device=input_ids.device)
-            
-            # Get router output for this layer
-            layer_router_output = self.routers[layer_idx](current_input, num_real_tokens)
-            router_outputs.append(layer_router_output)
-            
-            # Initialize layer output
-            layer_output = torch.zeros_like(current_input)
-            
-            # For each precision, compute layer output and mix
-            for i, precision in enumerate(self.precisions):
-                self.set_precision(precision)
-                
-                # Forward through this specific layer
-                # Option 1: Gradient checkpointing (recommended for most cases)
-                from torch.utils.checkpoint import checkpoint
-                
-                # Create a closure that properly captures the current layer and precision
-                def create_layer_forward_fn(layer_ref, precision_val, ap_linears_ref):
-                    def layer_forward_fn(x):
-                        """Wrapper function for gradient checkpointing with proper closure."""
-                        # Debug: Check input for NaN before layer forward
-                        if torch.isnan(x).any():
-                            print(f"WARNING: NaN in input to layer during checkpointing, precision {precision_val}")
-                        
-                        # CRITICAL: Ensure precision is set on ALL AnyPrecisionLinear modules
-                        # during recomputation to maintain consistency
-                        for ap_linear in ap_linears_ref:
-                            ap_linear.set_precision(precision_val)
-                        
-                        # Alternative approach: Pass precision explicitly to layer if supported
-                        # This ensures deterministic precision usage during recomputation
-                        try:
-                            # Check if the layer has modules that can accept precision parameter
-                            output = layer_ref(x, precision=precision_val)
-                        except TypeError:
-                            # Fallback to regular forward if precision parameter not supported
-                            output = layer_ref(x)
-                        
-                        # Debug: Check output for NaN after layer forward
-                        if torch.isnan(output).any() if isinstance(output, torch.Tensor) else torch.isnan(output[0]).any():
-                            print(f"WARNING: NaN in layer output during checkpointing, precision {precision_val}")
-                        
-                        return output
-                    return layer_forward_fn
-                
-                layer_forward_fn = create_layer_forward_fn(layer, precision, self.ap_linears)
-                
-                # Debug: Check current_input before checkpointing
-                if torch.isnan(current_input).any():
-                    print(f"ERROR: NaN in current_input before checkpointing, precision {precision}")
-                
-                layer_output_precision = checkpoint(
-                    layer_forward_fn, 
-                    current_input, 
-                    use_reentrant=False  # Use newer, more memory-efficient checkpointing
-                )
-                
-                # Option 2: Custom autograd function (maximum memory efficiency)
-                # Uncomment below and comment above to use custom autograd:
-                # 
-                # class LayerForwardInputGradOnly(torch.autograd.Function):
-                #     @staticmethod
-                #     def forward(ctx, input_tensor, layer_module):
-                #         ctx.layer_module = layer_module
-                #         ctx.save_for_backward(input_tensor)
-                #         with torch.no_grad():
-                #             return layer_module(input_tensor)
-                #     
-                #     @staticmethod
-                #     def backward(ctx, grad_output):
-                #         input_tensor, = ctx.saved_tensors
-                #         layer_module = ctx.layer_module
-                #         input_for_grad = input_tensor.detach().requires_grad_(True)
-                #         with torch.enable_grad():
-                #             output = layer_module(input_for_grad)
-                #         grad_input = torch.autograd.grad(output, input_for_grad, grad_output)[0]
-                #         return grad_input, None
-                # 
-                # layer_output_precision = LayerForwardInputGradOnly.apply(current_input, layer)
-                
-      
-                # Mix based on router weights
-                precision_weight = layer_router_output[:, i:i+1].unsqueeze(-1)
-                if isinstance(layer_output_precision, tuple):
-                    layer_output += precision_weight * layer_output_precision[0]
-                else:
-                    layer_output += precision_weight * layer_output_precision
-            
-            current_input = layer_output
-        
-        # Final output processing through lm_head
-        final_output = self.model.lm_head(current_input)
-        
-        if return_router_outputs:
-            return type('Outputs', (), {'logits': final_output, 'router_outputs': router_outputs})()
-        else:
-            return type('Outputs', (), {'logits': final_output})()
+    def train_forward(self, return_router_outputs=False, **model_kwargs):
+        """Train forward: mimic HF forward path, but mix per-layer outputs by router weights.
 
-    def infer_forward(self, input_ids, return_router_outputs=False, **kwargs):
-        """Forward pass during inference using the precision with maximum router weight."""
-        batch_size, seq_len = input_ids.shape
-        
-        # Get embedding output
-        embeddings = self.model.get_input_embeddings()(input_ids)
-        current_input = embeddings
-        
-        # Process through each transformer layer
+        Accepts the same kwargs as `self.model.forward` (e.g., input_ids, attention_mask, labels, ...)
+        and returns the same HF output object. Optionally also returns router_outputs.
+        """
         layers = self.get_model_layers()
-        router_outputs = [] if return_router_outputs else None
-        
-        for layer_idx, layer in enumerate(layers):
-            # For fixed-length sequences, all tokens are real
-            num_real_tokens = torch.full((batch_size,), seq_len, dtype=torch.long, device=input_ids.device)
-            
-            # Get router output for this layer
-            layer_router_output = self.routers[layer_idx](current_input, num_real_tokens)
-            layer_precision_idx = torch.argmax(layer_router_output, dim=-1)
-            # Use maximum precision among all batches for highest quality
-            layer_precision_idx = torch.max(layer_precision_idx).item()
-            layer_precision = self.precisions[layer_precision_idx]
-            
-            # Convert selected precision to one-hot vector for consistency with train_forward
-            if return_router_outputs:
-                # Create one-hot vector representing the selected precision
-                one_hot_output = torch.zeros_like(layer_router_output)
-                one_hot_output[:, layer_precision_idx] = 1.0
-                router_outputs.append(one_hot_output)
-            
-            # Set precision and forward through layer
-            self.set_precision(layer_precision)
-            with torch.no_grad():
-                # For fixed-length sequences, let the model handle causal masking internally
-                layer_output = layer(current_input)
-            
-            if isinstance(layer_output, tuple):
-                current_input = layer_output[0]
-            else:
-                current_input = layer_output
-        
-        # Final output through lm_head
-        final_output = self.model.lm_head(current_input)
-        
+        original_forwards = [layer.forward for layer in layers]
+        router_outputs = []
+
+        attention_mask = model_kwargs.get('attention_mask', None)
+
+        # Precompute num_real_tokens per sample if attention_mask is provided
+        def compute_num_real_tokens(hidden_states):
+            batch_size, seq_len = hidden_states.shape[:2]
+            if attention_mask is not None:
+                return attention_mask.to(hidden_states.device).sum(dim=1)
+            return torch.full((batch_size,), seq_len, dtype=torch.long, device=hidden_states.device)
+
+        # Define mixed forward wrapper per layer
+        def make_mixed_forward(layer_idx, orig_fwd):
+            def mixed_forward(hidden_states, *args, **kwargs):
+                num_real_tokens = compute_num_real_tokens(hidden_states)
+                layer_router_output = self.routers[layer_idx](hidden_states, num_real_tokens)
+                if return_router_outputs:
+                    router_outputs.append(layer_router_output)
+
+                mixed_hidden = torch.zeros_like(hidden_states)
+                cached_first_out = None
+
+                for i, precision in enumerate(self.precisions):
+                    self.set_precision(precision)
+                    # Use gradient checkpointing to keep memory low while allowing backprop
+                    from torch.utils.checkpoint import checkpoint
+                    def f(hs):
+                        # Ensure precision is set during recomputation
+                        self.set_precision(precision)
+                        return orig_fwd(hs, *args, **kwargs)
+                    out_i = checkpoint(f, hidden_states, use_reentrant=False)
+
+                    if isinstance(out_i, tuple):
+                        hs_i = out_i[0]
+                        if cached_first_out is None:
+                            cached_first_out = out_i
+                    else:
+                        hs_i = out_i
+
+                    weight = layer_router_output[:, i:i+1].unsqueeze(-1)
+                    mixed_hidden = mixed_hidden + weight * hs_i
+
+                # Rebuild return matching original
+                if isinstance(cached_first_out, tuple):
+                    rebuilt = (mixed_hidden,) + tuple(cached_first_out[1:])
+                    return rebuilt
+                return mixed_hidden
+            return mixed_forward
+
+        # Patch forwards
+        for idx, layer in enumerate(layers):
+            layer.forward = make_mixed_forward(idx, original_forwards[idx])
+
+        try:
+            outputs = self.model.forward(**model_kwargs)
+        finally:
+            # Restore forwards
+            for layer, orig in zip(layers, original_forwards):
+                layer.forward = orig
+
         if return_router_outputs:
-            return type('Outputs', (), {'logits': final_output, 'router_outputs': router_outputs})()
-        else:
-            return type('Outputs', (), {'logits': final_output})()
+            # Attach for convenience while preserving HF output
+            if isinstance(outputs, tuple):
+                return type('Outputs', (), {'logits': outputs[0], 'router_outputs': router_outputs})()
+            if hasattr(outputs, 'logits'):
+                obj = outputs
+                obj.router_outputs = router_outputs
+                return obj
+            return type('Outputs', (), {'logits': outputs, 'router_outputs': router_outputs})()
+        return outputs
+
+    def infer_forward(self, return_router_outputs=False, **model_kwargs):
+        """Inference forward: mimic HF forward path, but select one precision per layer via router.
+
+        Accepts the same kwargs as `self.model.forward` and returns the same HF output object.
+        """
+        layers = self.get_model_layers()
+        original_forwards = [layer.forward for layer in layers]
+        collected_router = [] if return_router_outputs else None
+
+        attention_mask = model_kwargs.get('attention_mask', None)
+
+        def compute_num_real_tokens(hidden_states):
+            batch_size, seq_len = hidden_states.shape[:2]
+            if attention_mask is not None:
+                return attention_mask.to(hidden_states.device).sum(dim=1)
+            return torch.full((batch_size,), seq_len, dtype=torch.long, device=hidden_states.device)
+
+        def make_selected_forward(layer_idx, orig_fwd):
+            def selected_forward(hidden_states, *args, **kwargs):
+                num_real_tokens = compute_num_real_tokens(hidden_states)
+                layer_router_output = self.routers[layer_idx](hidden_states, num_real_tokens)
+                # Choose one precision for whole batch (argmax of batch-average)
+                avg_weights = layer_router_output.mean(dim=0)
+                sel_idx = torch.argmax(avg_weights).item()
+                sel_precision = self.precisions[sel_idx]
+
+                if return_router_outputs:
+                    one_hot = torch.zeros_like(layer_router_output)
+                    one_hot[:, sel_idx] = 1.0
+                    collected_router.append(one_hot)
+
+                self.set_precision(sel_precision)
+                with torch.no_grad():
+                    return orig_fwd(hidden_states, *args, **kwargs)
+            return selected_forward
+
+        # Patch forwards
+        for idx, layer in enumerate(layers):
+            layer.forward = make_selected_forward(idx, original_forwards[idx])
+
+        try:
+            outputs = self.model.forward(**model_kwargs)
+        finally:
+            for layer, orig in zip(layers, original_forwards):
+                layer.forward = orig
+
+        if return_router_outputs:
+            if isinstance(outputs, tuple):
+                return type('Outputs', (), {'logits': outputs[0], 'router_outputs': collected_router})()
+            if hasattr(outputs, 'logits'):
+                obj = outputs
+                obj.router_outputs = collected_router
+                return obj
+            return type('Outputs', (), {'logits': outputs, 'router_outputs': collected_router})()
+        return outputs
 
     def forward(self, input_ids, **kwargs):
         # Default to infer_forward
