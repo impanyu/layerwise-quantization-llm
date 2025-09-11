@@ -221,8 +221,12 @@ class RouterEvaluator:
     
     def custom_loss(self, outputs, labels, router_outputs):
         """Custom loss function matching the training setup."""
-        # Cross entropy loss
-        ce_loss = self.ce_loss_fn(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
+        # Cross entropy loss with proper label shifting for language modeling
+        # outputs.logits[:, :-1] predicts tokens 1 to N
+        # labels[:, 1:] contains tokens 1 to N (ground truth)
+        shift_logits = outputs.logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        ce_loss = self.ce_loss_fn(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         
         # Calculate average precision
         avg_precision = self.calculate_average_precision(router_outputs)

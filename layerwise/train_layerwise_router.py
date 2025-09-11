@@ -285,8 +285,12 @@ class RouterTrainer:
             print(f"Logits shape: {outputs.logits.shape}")
             print(f"Logits min: {outputs.logits.min()}, max: {outputs.logits.max()}")
         
-        # Cross entropy loss
-        ce_loss = nn.CrossEntropyLoss()(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
+        # Cross entropy loss with proper label shifting for language modeling
+        # outputs.logits[:, :-1] predicts tokens 1 to N
+        # labels[:, 1:] contains tokens 1 to N (ground truth)
+        shift_logits = outputs.logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        ce_loss = nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         
         # Debug: Check CE loss
         if torch.isnan(ce_loss):
