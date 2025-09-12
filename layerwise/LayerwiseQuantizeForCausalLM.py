@@ -85,20 +85,24 @@ def sparsemax(input, dim=-1):
 
 
 class Router(nn.Module):
-    """Router network that outputs a one-hot vector for precision selection.
+    """Router network that outputs strategies for all layers.
     
+    Takes flattened embedding input [batch_size * seq_len * embedding_dim] and 
+    outputs [num_layers, num_precisions] strategies.
     Uses softmax activation by default. Sparsemax implementation is available
     in the sparsemax() function above if sparse outputs are needed in the future.
     """
-    def __init__(self, input_dim, num_precisions, hidden_dim=128, dtype=None, use_sparsemax=False):
+    def __init__(self, input_dim, total_outputs, hidden_dim=128, dtype=None, use_sparsemax=False, num_precisions=6):
         super().__init__()
         # Always use float32 for router parameters to avoid numerical instability
         # Ignore the dtype parameter - router always uses float32 internally
+        
         self.fc1 = nn.Linear(input_dim, hidden_dim, dtype=torch.float32)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim, dtype=torch.float32)
-        self.fc3 = nn.Linear(hidden_dim, num_precisions, dtype=torch.float32)
+        self.fc3 = nn.Linear(hidden_dim, total_outputs, dtype=torch.float32)
         self.dropout = nn.Dropout(0.1)
         self.use_sparsemax = use_sparsemax
+        self.num_precisions = num_precisions
         
         # Initialize weights to prevent extreme values
         with torch.no_grad():
@@ -113,10 +117,9 @@ class Router(nn.Module):
                 nn.init.zeros_(self.fc3.bias)
         
     def forward(self, x, num_real_tokens=None):
-        # Use mean pooling if input has multiple dimensions
-        if x.dim() > 2:
-            # x should be (batch_size, seq_len, hidden_dim)
-            x = x.mean(dim=1)  # Average over sequence length -> (batch_size, hidden_dim)
+        # Flatten input to single vector for batch-shared strategies
+        # Simply flatten all dimensions: [batch_size, seq_len, hidden_dim] -> [batch_size * seq_len * hidden_dim]
+        x = x.flatten()
         
         # Store original dtype to convert back at the end
         original_dtype = x.dtype
@@ -125,11 +128,9 @@ class Router(nn.Module):
         if torch.isnan(x).any():
             print(f"WARNING: NaN detected in router input, using uniform distribution")
             print(f"Input stats: min={x.min()}, max={x.max()}, mean={x.mean()}")
-            # Return uniform distribution over precisions instead of propagating NaN
-            # Make sure it requires grad to maintain gradient flow
-            batch_size = x.shape[0]
-            num_precisions = self.fc3.out_features
-            uniform_output = torch.full((batch_size, num_precisions), 1.0/num_precisions, 
+            # Return uniform distribution over all layer precisions
+            total_outputs = self.fc3.out_features
+            uniform_output = torch.full((total_outputs,), 1.0, 
                                       device=x.device, dtype=original_dtype, requires_grad=True)
             return uniform_output
         
@@ -146,21 +147,25 @@ class Router(nn.Module):
         if torch.isinf(x).any() or x.abs().max() > 50:
             print(f"WARNING: Extreme values before activation: min={x.min()}, max={x.max()}")
         
+        # Reshape to [num_layers, num_precisions] before applying activation
+        total_outputs = x.shape[0]
+        num_precisions = self.num_precisions
+        num_layers = total_outputs // num_precisions
+        x = x.view(num_layers, num_precisions)
+        
         # Apply activation function based on configuration
         if self.use_sparsemax:
-            # Sparsemax for sparse precision selection
+            # Sparsemax for sparse precision selection (along precision dimension)
             x = sparsemax(x, dim=-1)
         else:
-            # Softmax for smooth precision distribution (default)
+            # Softmax for smooth precision distribution (along precision dimension)
             x = F.softmax(x, dim=-1)
         
         # Final safety check
         if torch.isnan(x).any():
             print(f"WARNING: NaN detected in router output, using uniform distribution")
-            batch_size = x.shape[0]
-            num_precisions = x.shape[1]
-            uniform_output = torch.full((batch_size, num_precisions), 1.0/num_precisions, 
-                                      device=x.device, dtype=original_dtype, requires_grad=True)
+            uniform_output = torch.full_like(x, 1.0/num_precisions, 
+                                           device=x.device, dtype=original_dtype, requires_grad=True)
             return uniform_output
         
         # Convert back to original dtype (float16) for compatibility with model
@@ -235,19 +240,30 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
 
         self.prune_precisions()
 
-    def _initialize_routers(self):
-        """Initialize router networks for each layer."""
-        self.routers = nn.ModuleList()
+    def _initialize_routers(self, batch_size=4, seq_len=512):
+        """Initialize single router that outputs strategies for all layers.
+        
+        Args:
+            batch_size: Batch size for training (default: 4)
+            seq_len: Sequence length for training (default: 512)
+        """
         layers = self.get_model_layers()
-        
-        # Router for embedding layer (before first transformer layer)
+        num_layers = len(layers)
         embedding_dim = self.model.config.hidden_size
-        model_dtype = next(self.model.parameters()).dtype
-        self.embedding_router = Router(embedding_dim, len(self.precisions), use_sparsemax=self.use_sparsemax)
         
-        # Routers for each transformer layer
-        for _ in layers:
-            self.routers.append(Router(embedding_dim, len(self.precisions), use_sparsemax=self.use_sparsemax))
+        # Calculate flattened input dimension: batch_size * seq_len * embedding_dim
+        input_dim = batch_size * seq_len * embedding_dim
+        
+        # Single router that takes flattened embedding output and produces strategies for all layers
+        self.router = Router(
+            input_dim=input_dim,
+            total_outputs=num_layers * len(self.precisions),
+            use_sparsemax=self.use_sparsemax,
+            num_precisions=len(self.precisions)
+        )
+        
+        self.num_layers = num_layers
+        self.embedding_dim = embedding_dim
 
     def _freeze_original_parameters(self):
         """Freeze all parameters from the original language model."""
@@ -265,15 +281,11 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         
         print(f"✓ Frozen {sum(p.numel() for p in self.model.parameters())} original LM parameters")
         print(f"✓ Frozen {sum(p.numel() for p in self.ap_linears[0].parameters()) * len(self.ap_linears)} AP linear parameters")
-        print(f"✓ Only router parameters ({sum(p.numel() for p in self.routers.parameters())} parameters) will be trained")
+        print(f"✓ Only router parameters ({sum(p.numel() for p in self.router.parameters())} parameters) will be trained")
 
     def get_trainable_parameters(self):
-        """Return trainable parameters (only routers)."""
-        trainable_params = []
-        for router in self.routers:
-            trainable_params.extend(router.parameters())
-        trainable_params.extend(self.embedding_router.parameters())
-        return trainable_params
+        """Return trainable parameters (only the single router)."""
+        return list(self.router.parameters())
 
     def get_frozen_parameters(self):
         """Return frozen parameters (original LM + AP linear layers)."""
@@ -305,6 +317,9 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         layers = self.get_model_layers()
         original_forwards = [layer.forward for layer in layers]
         router_outputs = []
+        
+        # Generate routing strategies for all layers from initial embeddings
+        global_router_strategies = None
 
         attention_mask = model_kwargs.get('attention_mask', None)
 
@@ -318,8 +333,20 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         # Define mixed forward wrapper per layer
         def make_mixed_forward(layer_idx, orig_fwd):
             def mixed_forward(hidden_states, *args, **kwargs):
-                num_real_tokens = compute_num_real_tokens(hidden_states)
-                layer_router_output = self.routers[layer_idx](hidden_states, num_real_tokens)
+                nonlocal global_router_strategies
+                
+                # Generate router strategies from initial embeddings (only once for first layer)
+                if global_router_strategies is None:
+                    # Use the initial embeddings (current hidden_states for first layer)
+                    global_router_strategies = self.router(hidden_states)  # [num_layers, num_precisions]
+                
+                # Get the strategy for this specific layer
+                layer_router_output = global_router_strategies[layer_idx]  # [num_precisions]
+                
+                # Expand to match batch size for compatibility
+                batch_size = hidden_states.shape[0]
+                layer_router_output = layer_router_output.unsqueeze(0).expand(batch_size, -1)  # [batch_size, num_precisions]
+                
                 if return_router_outputs:
                     router_outputs.append(layer_router_output)
 
@@ -449,6 +476,10 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         layers = self.get_model_layers()
         original_forwards = [layer.forward for layer in layers]
         collected_router = [] if return_router_outputs else None
+        
+        # Generate routing strategies for all layers from initial embeddings
+        global_router_strategies = None
+        global_selected_precisions = None
 
         attention_mask = model_kwargs.get('attention_mask', None)
 
@@ -460,21 +491,32 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
 
         def make_selected_forward(layer_idx, orig_fwd):
             def selected_forward(hidden_states, *args, **kwargs):
-                num_real_tokens = compute_num_real_tokens(hidden_states)
-                layer_router_output = self.routers[layer_idx](hidden_states, num_real_tokens)
-                # Choose one precision for whole batch (argmax of batch-average)
-                avg_weights = layer_router_output.mean(dim=0)
-                sel_idx = torch.argmax(avg_weights).item()
-                sel_precision = self.precisions[sel_idx]
+                nonlocal global_router_strategies, global_selected_precisions
+                
+                # Generate router strategies from initial embeddings (only once for first layer)
+                if global_router_strategies is None:
+                    # Use the initial embeddings (current hidden_states for first layer)
+                    global_router_strategies = self.router(hidden_states)  # [num_layers, num_precisions]
+                    
+                    # Select precision for each layer (argmax of each layer's strategy)
+                    global_selected_precisions = []
+                    for layer_strategy in global_router_strategies:
+                        sel_idx = torch.argmax(layer_strategy).item()
+                        sel_precision = self.precisions[sel_idx]
+                        global_selected_precisions.append((sel_idx, sel_precision))
+                
+                # Get the selected precision for this layer
+                sel_idx, sel_precision = global_selected_precisions[layer_idx]
 
                 if return_router_outputs:
-                    one_hot = torch.zeros_like(layer_router_output)
+                    # Create one-hot representation matching batch size
+                    batch_size = hidden_states.shape[0]
+                    one_hot = torch.zeros(batch_size, len(self.precisions), device=hidden_states.device)
                     one_hot[:, sel_idx] = 1.0
                     collected_router.append(one_hot)
 
                 self.set_precision(sel_precision)
-                with torch.no_grad():
-                    return orig_fwd(hidden_states, *args, **kwargs)
+                return orig_fwd(hidden_states, *args, **kwargs)
             return selected_forward
 
         # Patch forwards
