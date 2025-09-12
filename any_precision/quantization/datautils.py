@@ -32,12 +32,14 @@ def _get_c4(split):
             'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train',
             trust_remote_code=True
         )
+        print(f"len(training data total examples) = {len(data['text'])}")
     else:
         assert split == 'validation'
         data = load_dataset(
             'allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation',
             trust_remote_code=True
         )
+        print(f"len(validation data total examples) = {len(data['text'])}")
 
     return data['text']
 
