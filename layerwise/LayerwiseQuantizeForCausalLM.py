@@ -333,60 +333,68 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                     # Set precision for this forward pass
                     self.set_precision(precision)
                     
-                    # Create custom autograd function for this precision
-                    class PrecisionForward(torch.autograd.Function):
-                        @staticmethod
-                        def forward(ctx, hs, layer_fn, target_precision):
-                            # Store what we need for backward
-                            ctx.layer_fn = layer_fn
-                            ctx.target_precision = target_precision
-                            ctx.save_for_backward(hs)
+                    # Define the custom autograd function outside the loop to avoid closure issues
+                    def create_precision_autograd_fn(ap_linears_ref):
+                        class PrecisionForward(torch.autograd.Function):
+                            @staticmethod
+                            def forward(ctx, hs, layer_fn, target_precision, ap_linears):
+                                # Store what we need for backward
+                                ctx.layer_fn = layer_fn
+                                ctx.target_precision = target_precision
+                                ctx.ap_linears = ap_linears
+                                ctx.save_for_backward(hs)
+                                
+                                # Forward pass without storing intermediate activations
+                                with torch.no_grad():
+                                    # Ensure precision is set
+                                    for ap_linear in ap_linears:
+                                        ap_linear.set_precision(target_precision)
+                                    output = layer_fn(hs, *args, **kwargs)
+                                return output
                             
-                            # Forward pass without storing intermediate activations
-                            with torch.no_grad():
-                                # Ensure precision is set
-                                for ap_linear in self.ap_linears:
-                                    ap_linear.set_precision(target_precision)
-                                output = layer_fn(hs, *args, **kwargs)
-                            return output
+                            @staticmethod
+                            def backward(ctx, grad_output):
+                                # Retrieve stored data
+                                hs, = ctx.saved_tensors
+                                layer_fn = ctx.layer_fn
+                                target_precision = ctx.target_precision
+                                ap_linears = ctx.ap_linears
+                                
+                                # Create fresh input with gradients
+                                hs_grad = hs.detach().requires_grad_(True)
+                                
+                                # Recompute with gradients enabled
+                                with torch.enable_grad():
+                                    # Set precision for recomputation
+                                    for ap_linear in ap_linears:
+                                        ap_linear.set_precision(target_precision)
+                                    output = layer_fn(hs_grad, *args, **kwargs)
+                                
+                                # Get the right output tensor
+                                if isinstance(output, tuple):
+                                    output_tensor = output[0]
+                                else:
+                                    output_tensor = output
+                                
+                                # Compute gradients only for input
+                                grad_input = torch.autograd.grad(
+                                    outputs=output_tensor,
+                                    inputs=hs_grad,
+                                    grad_outputs=grad_output if not isinstance(grad_output, tuple) else grad_output[0],
+                                    retain_graph=False,
+                                    create_graph=False,
+                                    only_inputs=True
+                                )[0]
+                                
+                                return grad_input, None, None, None
                         
-                        @staticmethod
-                        def backward(ctx, grad_output):
-                            # Retrieve stored data
-                            hs, = ctx.saved_tensors
-                            layer_fn = ctx.layer_fn
-                            target_precision = ctx.target_precision
-                            
-                            # Create fresh input with gradients
-                            hs_grad = hs.detach().requires_grad_(True)
-                            
-                            # Recompute with gradients enabled
-                            with torch.enable_grad():
-                                # Set precision for recomputation
-                                for ap_linear in self.ap_linears:
-                                    ap_linear.set_precision(target_precision)
-                                output = layer_fn(hs_grad, *args, **kwargs)
-                            
-                            # Get the right output tensor
-                            if isinstance(output, tuple):
-                                output_tensor = output[0]
-                            else:
-                                output_tensor = output
-                            
-                            # Compute gradients only for input
-                            grad_input = torch.autograd.grad(
-                                outputs=output_tensor,
-                                inputs=hs_grad,
-                                grad_outputs=grad_output if not isinstance(grad_output, tuple) else grad_output[0],
-                                retain_graph=False,
-                                create_graph=False,
-                                only_inputs=True
-                            )[0]
-                            
-                            return grad_input, None, None
+                        return PrecisionForward
+                    
+                    # Create the autograd function class
+                    PrecisionForward = create_precision_autograd_fn(self.ap_linears)
                     
                     # Use custom autograd function
-                    out_i = PrecisionForward.apply(hidden_states, orig_fwd, precision)
+                    out_i = PrecisionForward.apply(hidden_states, orig_fwd, precision, self.ap_linears)
 
                     if isinstance(out_i, tuple):
                         hs_i = out_i[0]
