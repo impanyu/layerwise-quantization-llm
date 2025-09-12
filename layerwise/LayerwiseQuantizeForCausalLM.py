@@ -326,13 +326,25 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                 mixed_hidden = torch.zeros_like(hidden_states)
                 cached_first_out = None
 
-                # Process precisions one at a time to reduce memory usage
+                # Use gradient checkpointing with isolated precision contexts
+                from torch.utils.checkpoint import checkpoint
+                
                 for i, precision in enumerate(self.precisions):
-                    # Set precision for this specific forward pass
-                    self.set_precision(precision)
+                    # Create precision-isolated checkpoint function
+                    def create_precision_checkpoint_fn(target_precision):
+                        def precision_checkpoint_fn(hs):
+                            # Set precision within the checkpoint context
+                            for ap_linear in self.ap_linears:
+                                ap_linear.set_precision(target_precision)
+                            # Run the original forward with this specific precision
+                            return orig_fwd(hs, *args, **kwargs)
+                        return precision_checkpoint_fn
                     
-                    # Forward pass with current precision
-                    out_i = orig_fwd(hidden_states, *args, **kwargs)
+                    # Create the checkpoint function for this precision
+                    checkpoint_fn = create_precision_checkpoint_fn(precision)
+                    
+                    # Use gradient checkpointing with isolated precision state
+                    out_i = checkpoint(checkpoint_fn, hidden_states, use_reentrant=False)
 
                     if isinstance(out_i, tuple):
                         hs_i = out_i[0]
@@ -344,13 +356,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                     # Get the weight for this precision
                     weight = layer_router_output[:, i:i+1].unsqueeze(-1)
                     
-                    # Accumulate weighted output directly to save memory
+                    # Accumulate weighted output
                     mixed_hidden = mixed_hidden + weight * hs_i
-                    
-                    # Don't keep references to intermediate tensors
-                    del out_i, hs_i
-                    if i < len(self.precisions) - 1:  # Don't clear on last iteration
-                        torch.cuda.empty_cache()
 
                 # Rebuild return matching original
                 if isinstance(cached_first_out, tuple):
