@@ -353,7 +353,10 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                                 return output
                             
                             @staticmethod
-                            def backward(ctx, grad_output):
+                            def backward(ctx, *grad_outputs):
+                                # Get the first (and likely only) gradient output
+                                grad_output = grad_outputs[0]
+                                
                                 # Retrieve stored data
                                 hs, = ctx.saved_tensors
                                 layer_fn = ctx.layer_fn
