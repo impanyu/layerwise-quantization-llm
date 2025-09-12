@@ -326,12 +326,12 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                 mixed_hidden = torch.zeros_like(hidden_states)
                 cached_first_out = None
 
+                # Process precisions one at a time to reduce memory usage
                 for i, precision in enumerate(self.precisions):
                     # Set precision for this specific forward pass
                     self.set_precision(precision)
                     
-                    # Temporarily disable gradient checkpointing to avoid shape mismatch
-                    # The issue appears to be related to attention head reshaping, not precision
+                    # Forward pass with current precision
                     out_i = orig_fwd(hidden_states, *args, **kwargs)
 
                     if isinstance(out_i, tuple):
@@ -341,8 +341,16 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                     else:
                         hs_i = out_i
 
+                    # Get the weight for this precision
                     weight = layer_router_output[:, i:i+1].unsqueeze(-1)
+                    
+                    # Accumulate weighted output directly to save memory
                     mixed_hidden = mixed_hidden + weight * hs_i
+                    
+                    # Don't keep references to intermediate tensors
+                    del out_i, hs_i
+                    if i < len(self.precisions) - 1:  # Don't clear on last iteration
+                        torch.cuda.empty_cache()
 
                 # Rebuild return matching original
                 if isinstance(cached_first_out, tuple):
