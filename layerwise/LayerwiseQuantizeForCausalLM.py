@@ -327,14 +327,26 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
                 cached_first_out = None
 
                 for i, precision in enumerate(self.precisions):
+                    # Set precision for this specific forward pass
                     self.set_precision(precision)
-                    # Use gradient checkpointing to keep memory low while allowing backprop
+                    
+                    # Use gradient checkpointing with precision-aware recomputation
                     from torch.utils.checkpoint import checkpoint
-                    def f(hs):
-                        # Ensure precision is set during recomputation
-                        self.set_precision(precision)
-                        return orig_fwd(hs, *args, **kwargs)
-                    out_i = checkpoint(f, hidden_states, use_reentrant=False)
+                    
+                    def create_precision_forward_fn(target_precision, ap_linears_list):
+                        """Create a function that ensures precision is set correctly during recomputation."""
+                        def precision_forward_fn(hs):
+                            # During recomputation, ensure precision is set correctly
+                            for ap_linear in ap_linears_list:
+                                ap_linear.set_precision(target_precision)
+                            return orig_fwd(hs, *args, **kwargs)
+                        return precision_forward_fn
+                    
+                    # Create the precision-specific forward function
+                    precision_forward_fn = create_precision_forward_fn(precision, self.ap_linears)
+                    
+                    # Use gradient checkpointing with the precision-aware function
+                    out_i = checkpoint(precision_forward_fn, hidden_states, use_reentrant=False)
 
                     if isinstance(out_i, tuple):
                         hs_i = out_i[0]
