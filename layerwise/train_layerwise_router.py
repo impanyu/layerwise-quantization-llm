@@ -114,7 +114,9 @@ class RouterTrainer:
         self.model = LayerwiseQuantizeForCausalLM.from_quantized(
             quant_model_path=self.model_path,
             trust_remote_code=self.trust_remote_code,
-            precisions=self.precisions
+            precisions=self.precisions,
+            batch_size=self.batch_size,
+            seq_len=self.seq_len
         )
         
         self.model.to(self.device)

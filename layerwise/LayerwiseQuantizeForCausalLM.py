@@ -182,6 +182,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
             fuse_layers=False,
             trust_remote_code=True,
             use_sparsemax=False,
+            batch_size=4,
+            seq_len=512,
     ):
         super().__init__()
 
@@ -214,8 +216,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         # Replace to AnyPrecisionLinear layers
         self._load_quantized_modules()
 
-        # Initialize routers
-        self._initialize_routers()
+        # Initialize routers with provided dimensions
+        self._initialize_routers(batch_size, seq_len)
 
         # Freeze original LM parameters
         self._freeze_original_parameters()
@@ -240,12 +242,12 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
 
         self.prune_precisions()
 
-    def _initialize_routers(self, batch_size=4, seq_len=512):
+    def _initialize_routers(self, batch_size, seq_len):
         """Initialize single router that outputs strategies for all layers.
         
         Args:
-            batch_size: Batch size for training (default: 4)
-            seq_len: Sequence length for training (default: 512)
+            batch_size: Batch size for training
+            seq_len: Sequence length for training
         """
         layers = self.get_model_layers()
         num_layers = len(layers)
@@ -253,6 +255,14 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
         
         # Calculate flattened input dimension: batch_size * seq_len * embedding_dim
         input_dim = batch_size * seq_len * embedding_dim
+        
+        print(f"🚀 Initializing router with dimensions:")
+        print(f"   - Batch size: {batch_size}")
+        print(f"   - Sequence length: {seq_len}")
+        print(f"   - Embedding dim: {embedding_dim}")
+        print(f"   - Input dim: {input_dim}")
+        print(f"   - Num layers: {num_layers}")
+        print(f"   - Num precisions: {len(self.precisions)}")
         
         # Single router that takes flattened embedding output and produces strategies for all layers
         self.router = Router(
@@ -582,7 +592,9 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
             trust_remote_code=True,
             fuse_layers=False,
             precisions=None,
-            use_sparsemax=False
+            use_sparsemax=False,
+            batch_size=4,
+            seq_len=512
     ):
         config = cls._load_config(quant_model_path, trust_remote_code)
 
@@ -593,6 +605,8 @@ class LayerwiseQuantizeForCausalLM(nn.Module):
             fuse_layers=fuse_layers,
             trust_remote_code=trust_remote_code,
             use_sparsemax=use_sparsemax,
+            batch_size=batch_size,
+            seq_len=seq_len,
         )
 
         return ap_model

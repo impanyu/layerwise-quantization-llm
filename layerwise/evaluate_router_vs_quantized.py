@@ -99,11 +99,13 @@ class RouterEvaluator:
         self.weight_ce = self.config['weight_ce']
         self.weight_precision = self.config['weight_precision']
         
-        # Load model
+        # Load model with same dimensions as training
         self.model = LayerwiseQuantizeForCausalLM.from_quantized(
             quant_model_path=self.model_path,
             trust_remote_code=self.config.get('trust_remote_code', True),
-            precisions=self.precisions
+            precisions=self.precisions,
+            batch_size=self.batch_size,
+            seq_len=self.seq_len
         )
         
         # Load trained router weights
@@ -325,7 +327,7 @@ class RouterEvaluator:
                 batch_size = input_ids.shape[0]
                 
                 # Get the actual number of layers from the router model
-                num_layers = len(self.model.routers)
+                num_layers = self.model.num_layers
                 
                 # Create one-hot vectors representing the fixed precision
                 precision_idx = self.precisions.index(precision)
